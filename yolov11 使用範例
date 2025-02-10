@@ -672,5 +672,8 @@ print(f"- 漏检率: {1 - results.box.recall[2]:.4f}")
 
 
 
+第二部分：差异图计算
+
+metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = get_diff_map(ref, test, fn_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_thres
 
 

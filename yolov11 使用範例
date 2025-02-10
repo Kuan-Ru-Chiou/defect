@@ -755,15 +755,1137 @@ DefectDataList 2518
         2517  64592.7935  38925.8217      2.6250      0.9495 0000000000004b4b 60000000 403   0   2   0 00b0000000c004f70008011881100f00000000000000000000000000000000000000000000000000   1   0  -1 1085       -1     -999 
         2518  64941.1060  42573.1883      0.3500      0.4998 0000000000000100 0000000c  21  10   2   0 00000000000004040000000000000000000000000000000000000000000000000000000000000000   1   0  -1 1087       -1     -999
 
+######################################labeling config
+
+interfaces = [
+  "panel",
+  "update",
+  "controls",
+  "side-column",
+  "completions:menu",
+  "completions:add-new",
+  "completions:delete",
+  "predictions:menu",
+],
+
+user = {
+  'pk': 1,
+  'firstName': "Labeler",
+  'lastName': "",
+},
+###############################json function
+
+interfaces = [
+  "panel",
+  "update",
+  "controls",
+  "side-column",
+  "completions:menu",
+  "completions:add-new",
+  "completions:delete",
+  "predictions:menu",
+],
+
+user = {
+  'pk': 1,
+  'firstName': "Labeler",
+  'lastName': "",
+},
+
+################## image processor
+from PIL import Image
+import base64
+from io import BytesIO
+import numpy as np
+import json
+import cv2
+from alignment.alignment import load_defect_pair, get_diff_map
+import matplotlib.pyplot as plt
+# Function to convert a NumPy array to a Base64 encoded string
+
+def numpy_to_base64(img_array):
+    pil_img = Image.fromarray(img_array)
+    buffer = BytesIO()
+    pil_img.save(buffer, format="JPEG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+# Function to load images from a JSON file line by line and save into a dictionary
+def load_images_from_json(json_file):
+    images = {}
+    with open(json_file, 'r') as f:
+        for line in f:
+            data = json.loads(line)
+            lot_id = data['lot_id']
+            images[lot_id] = data
+    return images
+
+def apply_colormap(np_array, colormap, vmin=None, vmax=None):
+    # norm_array = (np_array - np_array.min()) / (np_array.max() - np_array.min())
+    if vmin and vmax:
+        norm_array = (np_array - vmin) / (vmax - vmin)
+    else:
+        norm_array = np_array
+    colormap_func = plt.get_cmap(colormap)
+    colored_array = colormap_func(norm_array)
+    return (colored_array[:, :, :3] * 255).astype(np.uint8)
+
+# Define a 2x2 convolution kernel
+def conv_kernel(kernel_size):
+    return np.ones((kernel_size, kernel_size), dtype=np.float32) / (kernel_size ** 2)
+
+def get_image_pair_for_studio_input(data_dir, selected_lot_id, selected_image_id, selected_image_type, vmin_level, max_features, max_shift, ransac_reproj_threshold, selected_alignment_method, conv_kernel_size):
+    img_dir = f"{data_dir}/{selected_lot_id}/{selected_lot_id}/Images/InstantReview{selected_image_type}"
+    fn_id = selected_image_id
+    ref, test, is_median_ref = load_defect_pair(img_dir, fn_id)
+    metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+        get_diff_map(ref, test, fn_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method=selected_alignment_method)
+    print(f"max_pos:{metadata['max_pos']}")
+    print(f"min_pos:{metadata['min_pos']}")
+
+    ref_colored = apply_colormap(proc_ref, 'gray')
+    test_colored = apply_colormap(proc_test, 'gray')
+    diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+    conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+    img1_base64 = numpy_to_base64(ref_colored)
+    img2_base64 = numpy_to_base64(test_colored)
+    img3_base64 = numpy_to_base64(diff_colored)
+    img4_base64 = numpy_to_base64(conv_diff_image)
+    return [img1_base64, img2_base64, img4_base64], metadata
+
+##############inference ########################################
+
+
+def load_image_as_numpy(image_path):
+    img = Image.open(image_path).convert('RGB')  # Ensure image is in RGB format
+    return np.array(img)
+
+def preprocess_image(img_np):
+    if img_np.ndim == 2:  # If the image is grayscale, convert to RGB
+        img_np = np.stack((img_np,) * 3, axis=-1)
+    elif img_np.shape[2] == 4:  # If the image has an alpha channel, remove it
+        img_np = img_np[:, :, :3]
+    return img_np
+
+def inference(img_np, ckpt="/home/hubert007/Code/label_tool/labeling/runs/detect/train3/weights/best.pt"):
+    # Load the finetuned model checkpoint
+    model = YOLO(ckpt)
+    
+    # Preprocess the image
+    img_np = preprocess_image(img_np)
+    
+    # Perform object detection
+    results = model(img_np)
+    # print(results['precision'])
+    # print(results['recall'])
+
+    # logger.info(f"inference results: {results}")
+    # Extract bounding box information
+    if results and len(results[0].boxes) > 0:
+        boxs_and_labels = []
+        # logger.debug(f"cls length: {len(results[0].boxes.cls)}")
+        # logger.debug(f"cls shape: {results[0].boxes.cls.shape}")
+        for i in range(len(results[0].boxes.cls)):
+
+            # logger.info(f"Detected boxs: {results[0].boxes}")
+
+            box = results[0].boxes  # Assuming we take the first detected box
+            label = box.cls[i]
+            x1, y1, x2, y2 = box.xyxy[i]
+            width = x2 - x1
+            height = y2 - y1
+            boxs_and_labels.append((x1, y1, width, height, label))
+        return boxs_and_labels
+    else:
+        return None
+
+# Example usage
+if __name__ == "__main__":
+    image_path = "/mnt/fs0/dataset/Layer_M/N3_M0-16_20240920_145106/N3_M0-16_20240920_145106/Images/InstantReviewT/1411L.png"
+    np_image = load_image_as_numpy(image_path)
+    bbox = inference(np_image)
+    # print('test result', bbox[0][0], bbox[0][1], bbox[0][2], bbox[0][3], bbox[0][4])  #ok  (x1, y1, width, height, label)
+
+    
+    if bbox:
+        print(f"Top-left: ({bbox[0][0]}, {bbox[0][1]}), Width: {bbox[0][2]}, Height: {bbox[0][3]}, label: {bbox[0][4]}")
+    else:
+        print("No bounding box detected.")
+
+
+######################################fine tune
+from ultralytics import YOLO
+import os
+import argparse
+from loguru import logger
+import yaml
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--epochs', type=int, default=200, help='number of epochs')
+    parser.add_argument('--imgsz', type=int, default=256, help='image size')
+    parser.add_argument('--exp_name', type=str, default=None, help='name of your experiment')
+    parser.add_argument('--dataset_path', type=str, required=True, help='dataset path')
+    args = parser.parse_args()
+
+
+
+    # Create the directory if it doesn't exist
+    os.makedirs('prelabel/model_based/YOLO/train_settings', exist_ok=True)
+
+    # Define the content of the YAML file
+    yaml_content = {
+        'path': args.dataset_path,
+        'train': 'train/images',
+        'val': 'val/images',
+        'test': 'test/images',
+        'nc': 1,
+        'names': {
+            0: 'defect'
+        }
+    }
+
+    # Write the content to the YAML file
+    with open(f'prelabel/model_based/YOLO/train_settings/{args.exp_name}.yaml', 'w') as yaml_file:
+        yaml.dump(yaml_content, yaml_file, default_flow_style=False)
+
+
+    # Load a model
+    model = YOLO("yolo11n.pt")  # load a pretrained model (recommended for training)
+
+    train_results = model.train(data=f"prelabel/model_based/YOLO/train_settings/{args.exp_name}.yaml", epochs=args.epochs, imgsz=args.imgsz, name=args.exp_name)
 
 
 
 
+    # Export the model to ONNX format
+    path = model.export(format="onnx")  # return path to exported model
+
+if __name__ == "__main__":
+    main()
+
+
+
+#########  dataset#################################################
+
+
+import shutil
+from sklearn.model_selection import train_test_split
+import json
+import os
+from PIL import Image
+import numpy as np
+from torchvision.utils import save_image
+import torch
+import cv2
+import re
+import sqlite3
+from PIL import Image, ImageDraw
+from alignment.alignment import load_defect_pair, get_diff_map
+from frontend.image_processor import numpy_to_base64, load_images_from_json, apply_colormap, conv_kernel
+import argparse
+from loguru import logger
+from tqdm import tqdm
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+def get_augmentation_pipeline(aug_params):
+    """
+    Create albumentations augmentation pipeline.
+    We use "albumentations" because it can handle the augmentations of bounding boxes. For example, when we rotate the image,
+    the bounding boxes should also be rotated.
+    :param aug_params: dict of augmentation parameters
+    :return: albumentations.Compose object with augmentation pipeline
+    """
+    return A.Compose([
+        A.RandomRotate90(p=aug_params.get('rotation_prob', 0.5)),
+        A.HorizontalFlip(p=aug_params.get('flip_prob', 0.5)),
+        A.VerticalFlip(p=aug_params.get('flip_prob', 0.5)),
+        A.Affine(
+            scale=aug_params.get('scale', (1.0, 1.2)),
+            translate_percent=(0.0, 0.0),
+            p=1.0
+        ),
+        # A.ColorJitter(
+        #     brightness=aug_params.get('brightness', 0.2),
+        #     contrast=aug_params.get('contrast', 0.2),
+        #     p=1.0
+        # ),
+        ToTensorV2()
+    ], bbox_params=A.BboxParams(format='yolo', label_fields=['category_ids']))
+
+
+def process_and_augment_images(image_array, bounding_boxes, aug_params, img_path, original=False):
+    """
+    augment the images and bounding boxes.
+    """
+    # Ensure the image is in RGB format
+    if image_array.shape[2] == 4:  # If the image has an alpha channel
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGRA2RGB)
+    else:
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+
+    # Prepare bounding boxes and labels
+    bboxes = []
+    category_ids = []
+    for bbox in bounding_boxes:
+        x_center = (bbox['x']+bbox['width']/2) / image_array.shape[1]
+        y_center = (bbox['y']+bbox['height']/2) / image_array.shape[0]
+        width = bbox['width'] / image_array.shape[1]
+        height = bbox['height'] / image_array.shape[0]
+        x_center = min(1.0, max(0.0, x_center))
+        y_center = min(1.0, max(0.0, y_center))
+        width = min(1.0, max(0.0, width))
+        height = min(1.0, max(0.0, height))
+
+        label = bbox['label']
+        
+        if label == "Defect_right" or label == "Defect_left":
+            category_ids.append(0)
+        elif label == "4D":
+            return None
+        
+        bboxes.append([x_center, y_center, width, height])
+
+    # Apply augmentations
+    if original == True:
+        return bboxes, category_ids
+    try:
+        transform = get_augmentation_pipeline(aug_params)
+        augmented = transform(image=image_array, bboxes=bboxes, category_ids=category_ids)
+        return augmented['image'], augmented['bboxes'], augmented['category_ids']
+    except:
+        logger.debug(f"error on {img_path}")
+        return None
+
+    # return augmented['image'], augmented['bboxes'], augmented['category_ids']
+
+def check_image_variants(image_path):
+    """
+    Get the base path and file name without extension (1070L.png ,1070U.png ....)
+    """
+    logger.info(f"Checking image variants for {image_path}")
+    base_path, file_name = os.path.split(image_path)
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    
+    # Define the variants
+    variants = ['L', 'R', 'U', 'D']
+    
+    # Initialize a dictionary to store the paths of existing variants
+    # Check for each variant
+    for variant in variants:
+        variant_path = os.path.join(base_path, f"{file_name_no_ext}{variant}.png")
+        if os.path.exists(variant_path):
+            return variant_path
+        
+
+    
+def db_to_metadata(db_file, metadata_file, masked_image_output=None):
+    """
+    Convert SQLite database to metadata JSON file.
+    """
+    # Connect to SQLite database
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    # Query to retrieve all rows from the results_table
+    cursor.execute('SELECT image_path, results_json FROM results_table')
+    rows = cursor.fetchall()
+
+    # Create output directory if it doesn't exist
+    if masked_image_output:
+        output_dir = masked_image_output
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+    # Initialize a list to store metadata
+    metadata_list = []
+
+    for row in rows:
+        img_path, results_json = row
+        split_img_path = img_path.split(', ')
+        data_dir = split_img_path[0]
+        lot_id = split_img_path[1]
+        image_id = split_img_path[2]
+        results = json.loads(results_json)
+        # logger.debug(f"img_path: {img_path}")
+        # Check if 'areas' key exists in the JSON
+        if 'areas' in results:
+            t_boxes = []
+            rt_boxes = []
+            areas = results['areas']
+            for area_key, area_value in areas.items():
+                if area_value['object'] == 'image3' or area_value['object'] == 'image6':
+                    label = area_value['results'][0]['value']['rectanglelabels'][0]
+                    x = area_value['x']
+                    y = area_value['y']
+                    width = area_value['width']
+                    height = area_value['height']
+                    if area_value['object'] == 'image3':
+                    # Append metadata to the list
+                        t_boxes.append(
+                            {"x": x, "y": y, "width": width, "height": height, "label": label} 
+                        )
+                    else:
+                        rt_boxes.append(
+                            {"x": x, "y": y, "width": width, "height": height, "label": label} 
+                        )
+
+            metadata_list.append({
+                "image_path": f"{data_dir}/{lot_id}/{lot_id}/Images/InstantReviewT/{image_id}.png",
+                "bounding_box": t_boxes,
+            })
+            metadata_list.append({
+                "image_path": f"{data_dir}/{lot_id}/{lot_id}/Images/InstantReviewRt/{image_id}.png",
+                "bounding_box": rt_boxes,
+            })
+
+    # Write metadata to a JSON file
+    with open(metadata_file, 'w') as json_file:
+        json.dump(metadata_list, json_file, indent=4)
+
+    # Close the database connection
+    conn.close()
+    # json_to_text('metadata.json')
+
+def create_dataset(db_file ,json_file, dataset_dir, image_size=256, diff_map=False, aug_params = None, use_background = False, max_augment_factor = 8):
+
+    print(f"diff_map: {diff_map}")
+    # Create dataset directories
+    train_images_dir = os.path.join(dataset_dir, 'train/images')
+    train_labels_dir = os.path.join(dataset_dir, 'train/labels')
+    val_images_dir = os.path.join(dataset_dir, 'val/images')
+    val_labels_dir = os.path.join(dataset_dir, 'val/labels')
+    test_images_dir = os.path.join(dataset_dir, 'test/images')
+    test_labels_dir = os.path.join(dataset_dir, 'test/labels')
+    
+    os.makedirs(train_images_dir, exist_ok=True)
+    os.makedirs(train_labels_dir, exist_ok=True)
+    os.makedirs(val_images_dir, exist_ok=True)
+    os.makedirs(val_labels_dir, exist_ok=True)
+    os.makedirs(test_images_dir, exist_ok=True)
+    os.makedirs(test_labels_dir, exist_ok=True)
+
+    # Load JSON data
+    db_to_metadata(db_file, json_file)
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    
+    # Split data into train and validation sets
+    # First, split the data into train+val and test sets
+    train_val_data, test_data = train_test_split(data, test_size=0.1, random_state=42)
+
+    # Then, split the train+val data into train and val sets
+    train_data, val_data = train_test_split(train_val_data, test_size=0.2222, random_state=42)  # 0.2222 is approximately 2/9
+
+    # Now you have train_data (70%), val_data (20%), and test_data (10%)
+    
+    def process_data(data, images_dir, labels_dir, data_type):
+        for item in tqdm(data, desc=f"Processing {data_type} data"):
+            image_path = item['image_path']
+            if diff_map:
+                max_features = 1000
+                max_shift = 10
+                ransac_reproj_threshold = 0.20
+                image_dir = os.path.dirname(image_path)
+                # the lot_id doesn't matter here, it just affects the metadata created below, which won't be used in this case.
+                selected_lot_id = "DummyVariable"
+                vmin_level = -0.60
+                conv_kernel_size = 2
+                
+                # Extract the filename
+                filename = os.path.basename(image_path)
+                if 'InstantReviewT' in image_path:
+                    image_type = "T"
+                elif 'InstantReviewRt' in image_path:
+                    image_type = "Rt"
+
+                # Extract the number part of the filename using regular expressions
+                image_id = re.search(r'\d+', filename).group()
+
+                ref, test, is_median_ref = load_defect_pair(image_dir, image_id)
+
+                """
+                I think there's a bottleneck here. When the image isn't able to be aligned with correlate, the correlation alignment function outputs an error which
+                takes a makes the progress bar stuck for a while. This is worth checking out when optimizing the dataset pipeline. 
+                """
+
+                # Here we use Correlate for all images because it can handle broader cases than SIFT.
+                try:
+                    metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+                        get_diff_map(ref, test, image_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method="Correlate")
+                except:
+                    metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+                        get_diff_map(ref, test, image_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method="SIFT")                  
+                #save proc_diff as png image
+                diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+                conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+                diff_image_png = Image.fromarray(conv_diff_image)
+
+                # Save as PNG
+                
+                label_file = f"{image_type}_{image_id}_diff.txt"
+                label_path = os.path.join(labels_dir, label_file)             
+                # remove last filename from image_path
+
+                
+                #Start augmentation
+                bounding_boxes = item['bounding_box']
+
+                #before augmentation, add original image and label into dataset
+                
+                if len(bounding_boxes) == 0:
+                    if use_background == True:
+                        continue
+                    with open(label_path, "w") as f:
+                        pass
+                        
+                else:
+                    try:
+                        aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path, original=True)
+                    except:
+                        continue
+                    for box, label in zip(aug_bboxes, aug_labels):
+                        with open(label_path, "a") as f:
+                            f.write(f"{label} {box[0]} {box[1]} {box[2]} {box[3]}\n")
+                diff_image_png.save(os.path.join(images_dir, f"{image_type}_{image_id}_diff.png"))
+
+                num_of_augments = np.random.randint(1, max_augment_factor)
+                
+                for i in range(1, num_of_augments+1):
+                    #random vmin level [-1.70, -0.30]
+                    vmin_level = torch.FloatTensor(1).uniform_(-1.70, -0.30).item()
+                    diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+
+                    #apply random convolution kernel
+                    conv_kernel_size = torch.randint(1, 4, (1,)).item()
+                    conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+
+                    #apply albumentation's augmentations.
+                    try:
+                        aug_image, aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path)
+                    except:
+                        continue
+                    png_path = os.path.join(images_dir, f"{image_type}_{image_id}_diff_{str(i)}.png")
+                    label_path = os.path.join(labels_dir, f"{image_type}_{image_id}_diff_{str(i)}.txt")
+
+                    np_image = aug_image.permute(1, 2, 0).cpu().numpy()
+                    
+                    # Convert the NumPy array to a PIL image
+                    pil_image = Image.fromarray(np_image)
+                    
+                    # Save the PIL image
+                    pil_image.save(png_path)
+                    if len(aug_bboxes) == 0:
+                        if use_background == False:
+                            continue
+                        label = 'None'
+                        with open(label_path, 'w') as f:
+                            pass
+                    else:
+                        for bbox, label in zip(aug_bboxes, aug_labels):
+                            with open(label_path, 'a') as f:
+                                f.write(f"{label} {bbox[0]} {bbox[1]} {bbox[2]} {bbox[3]}\n")
+            else:
+                # Copy image to the dataset directory
+                shutil.copy(image_path, images_dir)
+                
+                # Create label file
+                image_name = os.path.basename(image_path)
+                label_file = os.path.splitext(image_name)[0] + '.txt'
+                label_path = os.path.join(labels_dir, label_file)
+
+    
+    # Process train and validation data
+
+
+    process_data(train_data, train_images_dir, train_labels_dir, "train")
+    process_data(val_data, val_images_dir, val_labels_dir, "val")
+    process_data(test_data, test_images_dir, test_labels_dir, "test")
+
+
+def dataset_checker(dataset_path):
+    # Directories to check
+    directories = ['train', 'val', 'test']
+    
+    missing_labels = []
+    empty_labels = []
+
+    for directory in directories:
+        image_dir = os.path.join(dataset_path, directory, 'images')
+        label_dir = os.path.join(dataset_path, directory, 'labels')
+        
+        # Get list of image files
+        image_files = [f for f in os.listdir(image_dir) if f.endswith('.png')]
+        
+        for image_file in image_files:
+            label_file = os.path.splitext(image_file)[0] + '.txt'
+            label_path = os.path.join(label_dir, label_file)
+            
+            if not os.path.exists(label_path):
+                print(f"no label at {image_file}")
+                missing_labels.append(os.path.join(directory, 'images', image_file))
+            else:
+                with open(label_path, 'r') as f:
+                    content = f.read().strip()
+                    if not content:
+                        print(f"empty label at {label_file}")
+                        empty_labels.append(os.path.join(directory, 'labels', label_file))
+    
+    # return missing_labels, empty_labels
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Create YOLO dataset from .db file")
+    parser.add_argument("--db_file" , type=str, help="Path to the .db file")
+    parser.add_argument("--json_metadata", type=str, help="Path to the JSON metadata file")
+    parser.add_argument("--dataset_path", type=str, help="Path to the dataset directory")
+    parser.add_argument("--use_diff_map", type=bool, default=True, help="Use diff map as image for the dataset")
+    parser.add_argument("--max_augment_factor", type=int, default=8, help="Max number of augmentation data on each image")
+    parser.add_argument("--use_background", action='store_true', default=False, help="Use background images for the dataset")
+    args = parser.parse_args()
+
+    aug_params = {
+        'rotation_prob': 0.5,
+        'flip_prob': 0.5,
+        'scale': (1.0, 1.2),
+        'brightness': 0.2,
+        'contrast': 0.2
+    }
+    create_dataset(args.db_file, args.json_metadata, args.dataset_path, diff_map=args.use_diff_map, aug_params=aug_params, use_background=args.use_background, max_augment_factor=args.max_augment_factor)
+
+
+if __name__ == "__main__":
+    main()
+    # dataset_checker("/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/model_based/YOLO/datasets/m_layer_aug_fix")
+
+
+
+######yolo prelabel training
+from prelabel.model_based.YOLO.inference import inference
+
+
+def YOLO_prelabel(t_np_image, rt_np_image, model_path, annotations):
+        t_bbox = inference(t_np_image, model_path)
+        if t_bbox != None:
+            for box in t_bbox:
+                x = box[0]
+                y = box[1]
+                width = box[2]
+                height = box[3]
+                label = box[4]
+                for i in range(1, 4):
+                    annotation = {
+                        'from_name': f'label_image{i}',
+                        'to_name': f'image{i}',
+                        'type': 'rectanglelabels',
+                        'value': {
+                            'rectanglelabels': ['Defect_right'],
+                            'x': x.item()*100/256,
+                            'y': y.item()*100/256,
+                            'width': width.item()*100/256,
+                            'height': height.item()*100/256,
+                        }
+                    }       
+                    annotations.append(annotation)       
+        rt_bbox = inference(rt_np_image, model_path)
+        if rt_bbox != None:
+            for box in rt_bbox:
+                x = box[0]
+                y = box[1]
+                width = box[2]
+                height = box[3]
+                label = box[4]
+                # The main diference is here: it is using a different range for the loop (image 4,5,6)
+                for i in range(4, 7):
+                    annotation = {
+                        'from_name': f'label_image{i}',
+                        'to_name': f'image{i}',
+                        'type': 'rectanglelabels',
+                        'value': {
+                            'rectanglelabels': ['Defect_right'],
+                            'x': x.item()*100/256,
+                            'y': y.item()*100/256,
+                            'width': width.item()*100/256,
+                            'height': height.item()*100/256,
+                        }
+                    }       
+                    annotations.append(annotation)      
+                return annotations
+
+
+# YOLO prelabeler training
+
+
+## Prepare dataset
+**Run commands under /toggle_labelstudio**
+
+After finishing labeling, you will get .db file under /toggle_labelstudio.
+Convert that .db file into YOLO training format by running the following command:
+```bash
+python -m prelabel.model_based.YOLO.dataset --db_file example.db --json_metadata example.json --dataset_path dataset_path
+```
+* `db_file`: .db file path.
+* `json_metadata`: desired metadata json file path (will create for you).
+* `dataset_path`: output dataset directory (will create for you).
+
+## Train model
+
+### run finetune
+
+```bash
+python -m prelabel.model_based.YOLO.finetune --epochs 200 --imgsz 256 --exp_name "experiment name" --dataset_path "dataset_path"
+```
+Other arguments will be added later(TODO)
+
+###################################################prelabel.py
+
+import cv2
+import numpy as np
+import base64
+from PIL import Image
+from io import BytesIO
+from prelabel.model_based.YOLO.api import YOLO_prelabel
+from prelabel.rule_based.minmax.api import minmax_prelabel
+from loguru import logger
+
+def base64_to_numpy(base64_str):
+    img_data = base64.b64decode(base64_str)
+    img = Image.open(BytesIO(img_data))
+    return np.array(img)
+
+def extract_annotations(existing_labels):
+    """
+    This function extracts the bounding boxes from "existing_labels", which is the dictionary that "st_labelstudio" returns after submit.
+    It is quite important to study how "existing_labels" is structured if you want to add new annotation types.
+    "polygonlabels" is deprecated currently since the database doesn't handle that format, but as long as you 
+    understand "existing_labels" format, you can add it back.
+    """
+    annotations = []
+    if 'areas' in existing_labels:
+        # areas describe all the bounded areas (bounding box, polygon..)
+        for area_id, area_data in existing_labels['areas'].items():
+            if 'results' in area_data:
+                for result in area_data['results']:
+                    annotation = {
+                        "id": result["id"],
+                        "from_name": result['from_name'],
+                        "to_name": result['to_name'],
+                        "type": result['type']
+                    }
+                    if annotation["type"] == "polygonlabels":
+                        annotation["value"] = {
+                            "polygonlabels": result['value']['polygonlabels'],
+                            "points": [[point['relativeX'], point['relativeY']] for point in area_data['points']],
+                        }
+                    elif annotation["type"] == "rectanglelabels":
+                        annotation["value"] = {
+                            "rectanglelabels": result['value']['rectanglelabels'],
+                            # converting absolute pixel values into percentage
+                            "x": area_data['x']*100/256,
+                            "y": area_data['y']*100/256,
+                            "width": area_data['width']*100/256,
+                            "height": area_data['height']*100/256,
+                            "rotation": area_data['rotation'],
+                        }
+                    annotations.append(annotation)
+    return annotations
+
+def generate_prelabels(metadatas, crop_size, method="minmax", model_path=None, t_image=None, rt_image=None, label_type="rectangle"):
+    """
+    Call your prelabel logics here.
+    You can call/define any prelabel method as long as the list "annotations" contains 6 elements each with the following format:
+    {
+        'from_name': f'label_image{i}',
+        'to_name': f'image{i}',
+        'type': 'rectanglelabels',
+        'value': {
+            'rectanglelabels': ['Defect_right'],
+            'x': x coord of bounding box's TOP LEFT in PERCENTAGE [0, 100],
+            'y': y coord of bounding box's TOP LEFT in PERCENTAGE [0, 100],
+            'width': bounding box width in PERCENTAGE [0, 100],
+            'height': bounding box height in PERCENTAGE [0, 100],
+        }
+    } 
+
+    Basically you have to return six bounding boxes for i is from 1~6, representing 6 images (t_ref, t_test, t_diff, rt_ref, rt_test, rt_diff).
+    Then these annotations will be rendered onto UI.
+    """
+    
+    annotations = []
+    if method == "YOLO":
+        # why does YOLO only take in 2 images? Because we only predict on the diff map. t_image is the t_diffmap vice versa.
+        t_np_image = base64_to_numpy(t_image)
+        rt_np_image = base64_to_numpy(rt_image)
+        YOLO_prelabel(t_np_image, rt_np_image, model_path, annotations)
+   
+    elif method == "minmax":
+        # metadatas contains the min/max point, which is acquired from SIFT's alignment functions.
+        # crop_size is the size of the bounding box to bound the min/max point. It can be toggled on sidebar.
+        minmax_prelabel(metadatas, crop_size, annotations)
+    return annotations
+
+def task_generator(images, crop_size, metadatas=None, method="minmax", model_path=None, label_type="rectangle", existing_labels=None):
+    """
+    This is the MAIN function that handles our customize logic and pass it in to labelstudio as "predictions". 
+    Be aware that both "existing labels" and "prelabel predictions" are passed in as "predictions".
+    I didn't use "completions", you can ignore that, also you can disable its UI in the UI settings (gear icon).
+    """
+    task = {
+        'completions': [],
+        'predictions': [],
+        'id': 1,
+        'data': {
+            'image1': f"data:image/jpeg;base64,{images[0]}",
+            'image2': f"data:image/jpeg;base64,{images[1]}",
+            'image3': f"data:image/jpeg;base64,{images[2]}",
+            'image4': f"data:image/jpeg;base64,{images[3]}",
+            'image5': f"data:image/jpeg;base64,{images[4]}",
+            'image6': f"data:image/jpeg;base64,{images[5]}"
+        }
+    }
+    if existing_labels:
+        annotations = extract_annotations(existing_labels)
+        task['predictions'].append({
+            'model_version': 'existing_labels',
+            'result': annotations
+        })
+    else:
+        print("no labels found, generating prelabels...")
+        annotations = generate_prelabels(metadatas, crop_size, method=method, model_path=model_path, t_image=images[2], rt_image=images[5], label_type=label_type)
+        task['predictions'].append({
+            'model_version': 'prelabeling',
+            'result': annotations
+        })
+
+    return task
+
+
+######export_json_and_mask
+
+import sqlite3
+import json
+from PIL import Image, ImageDraw
+import os
+from tqdm import tqdm
+import argparse
+
+def check_image_variants(image_path):
+    # Get the base path and file name without extension
+    base_path, file_name = os.path.split(image_path)
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    
+    # Define the variants
+    variants = ['L', 'R', 'U', 'D']
+    
+    # Initialize a dictionary to store the paths of existing variants
+    # Check for each variant
+    for variant in variants:
+        variant_path = os.path.join(base_path, f"{file_name_no_ext}{variant}.png")
+        if os.path.exists(variant_path):
+            return variant_path
+    
+def process_db_and_create_masked_images(db_file, output_dir):
+    # Connect to SQLite database
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    # Query to retrieve all rows from the results_table
+    cursor.execute('SELECT image_path, results_json FROM results_table')
+    rows = cursor.fetchall()
+
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Initialize a list to store metadata
+    metadata_list = []
+    for row in tqdm(rows, desc=f"Processing images"):
+        img_info, results_json = row
+        dataset_dir, lot_id, image_id = img_info.replace(" ","").split(',')
+        results = json.loads(results_json)
+        img_path = os.path.join(dataset_dir, f"{lot_id}/{lot_id}/Images")
+        # Check if 'areas' key exists in the JSON
+        if 'areas' in results:
+            areas = results['areas']
+            for area_key, area_value in areas.items():
+                if area_value['object'] == 'image3' or area_value['object'] == 'image6':
+                    if area_value['object'] == 'image3':
+                        full_img_path = os.path.join(img_path, f"InstantReviewT/{image_id}.png")
+                    else:
+                        full_img_path = os.path.join(img_path, f"InstantReviewRt/{image_id}.png")
+                    """
+                    If it comes from the right, the defect image is "fn_id.png", if left, it would be "fn_idL.png" or "fn_idU.png" ... etc.
+                    """
+                    if area_value['results'][0]['value']['rectanglelabels'][0] == "Defect_left":
+                        full_img_path = check_image_variants(full_img_path)
+                    x = area_value['x']
+                    y = area_value['y']
+                    width = area_value['width']
+                    height = area_value['height']
+
+                    # Open the image
+                    img = Image.open(full_img_path).convert("RGBA")
+                    masked_img = Image.new("RGBA", img.size, (0, 0, 0, 255))
+                    draw = ImageDraw.Draw(masked_img)
+
+                    # Draw the bounding box on the masked image (make it transparent)
+                    draw.rectangle([x, y, x + width, y + height], fill=(0, 0, 0, 0))
+
+                    # Composite the original image with the masked image
+                    final_img = Image.alpha_composite(img, masked_img)
+
+                    # Save the final masked image
+                    output_path = os.path.join(output_dir, f"{lot_id}_{os.path.basename(full_img_path)}")
+                    final_img.save(output_path)
+                    
+                    # Append metadata to the list
+                    metadata_list.append({
+                        "image_path": full_img_path,
+                        "bounding_box": {
+                            "x": x,
+                            "y": y,
+                            "width": width,
+                            "height": height
+                        }
+                    })
+
+    # Write metadata to a JSON file
+    with open(os.path.join(output_dir, 'metadata.json'), 'w') as json_file:
+        json.dump(metadata_list, json_file, indent=4)
+
+    # Close the database connection
+    conn.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="Process a SQLite database and create masked images.")
+    parser.add_argument('--db_path', type=str, help='Path to the SQLite database file')
+    parser.add_argument('--output_dir', type=str, help='Output directory for the masked images')
+    args = parser.parse_args()
+    process_db_and_create_masked_images(args.db_path, args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+########################################metadata.json
+[
+    {
+        "image_path": "/mnt/fs0/x9u_detection_result/N3_M0-16_20240920_145106/N3_M0-16_20240920_145106/Images/InstantReviewT/771L.png",
+        "bounding_box": {
+            "x": 137,
+            "y": 111,
+            "width": 54,
+            "height": 23
+        }
+    },
+    {
+        "image_path": "/mnt/fs0/x9u_detection_result/N3_M0-16_20240920_145106/N3_M0-16_20240920_145106/Images/InstantReviewT/822L.png",
+        "bounding_box": {
+            "x": 124,
+            "y": 118,
+            "width": 12,
+            "height": 15
+        }
+    },]
+#################################alightment.py
+
+"""
+This file is modified from inspection_sift.py by Carl.
+I've removed some functions since the app doesn't use it. 
+The most important functions are "load_defect_pair" and "get_diff_map"
+"""
 
 
 
 
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import math
+import json
+import glob
+import os
+from loguru import logger
+from alignment.SIFT.sift import align_images_sift
+from alignment.correlation.correlation import align_images_corr
 
+
+
+def normalize_images(ref, test):
+    """Normalize images using OpenCV functions."""
+    # Convert to float32 for processing
+    ref_f = ref.astype(np.float32)
+    test_f = test.astype(np.float32)
+
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    ref_eq = clahe.apply((ref_f * 255).astype(np.uint8)) / 255.0
+    test_eq = clahe.apply((test_f * 255).astype(np.uint8)) / 255.0
+
+    # Normalize to zero mean and unit variance
+    ref_norm = cv2.normalize(ref_eq, None, 0, 1, cv2.NORM_MINMAX)
+    test_norm = cv2.normalize(test_eq, None, 0, 1, cv2.NORM_MINMAX)
+
+    return ref_norm, test_norm
+
+def load_defect_pair(img_path, defect_no):
+    """
+    This function finds the test and reference image from the dataset directory. (currently from "/mnt/fs0/dataset/Layer_M")
+    It handles the suffixes(L, U, Up, Lp ...)
+    """
+    test = None
+    ref_U = None
+    ref_L = None
+    ref_Up = None
+    ref_Lp = None
+
+    images = glob.glob(f'{img_path}/{str(defect_no)}*')
+    for image in images:
+        if image == f'{img_path}/{str(defect_no)}.png':
+            test = image
+        elif image == f'{img_path}/{str(defect_no)}U.png':
+            ref_U = image
+        elif image == f'{img_path}/{str(defect_no)}L.png':
+            ref_L = image
+        elif image == f'{img_path}/{str(defect_no)}L_p.png':
+            ref_Lp = image
+        elif image == f'{img_path}/{str(defect_no)}U_p.png':
+            ref_Up = image
+
+    if test is None:
+        raise ValueError(f'{defect_no}: No Test Image')
+
+    test = cv2.imread(test, cv2.IMREAD_GRAYSCALE)/255
+
+    # Create list to store all available images for median filtering
+    all_images = [test]
+
+    ref_u_img = None
+    ref_l_img = None
+    ref_up_img = None
+    ref_lp_img = None
+    if ref_U is not None:
+        ref_u_img = cv2.imread(ref_U, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_u_img)
+
+    if ref_L is not None:
+        ref_l_img = cv2.imread(ref_L, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_l_img)
+
+    if ref_Up is not None:
+        ref_up_img = cv2.imread(ref_Up, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_up_img)
+
+    if ref_Lp is not None:
+        ref_lp_img = cv2.imread(ref_Lp, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_lp_img)
+
+    # Only use median if we have more than 3 images, otherwise use ref_U as reference
+    if len(all_images) > 3:
+        reference = np.median(np.stack(all_images), axis=0)
+        is_median_ref = True
+    else:
+        is_median_ref = False
+        if ref_u_img is not None:
+            reference = ref_u_img
+        elif ref_l_img is not None:
+            reference = ref_l_img
+        elif ref_lp_img is not None:
+            reference = ref_lp_img
+        elif ref_up_img is not None:
+            reference = ref_up_img
+        else:
+            raise ValueError(f'{defect_no}: No reference image available')
+
+    return reference, test, is_median_ref
+
+def get_diff_map(ref, test, defect_no, lot_id, is_median_ref, max_features=1000, max_shift=10, ransacReprojThreshold=0.0, method="SIFT"):
+    """
+    input:
+    ref : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    test : numpy.ndarray, shape(256, 256), grayscale [0,1]
+
+    This function gets you the difference map and its metadata
+    You can add your own alignment methods here. As long as you return the following:
+    1.aligned_ref : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    2.aligned_test : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    3.translation : [translation_x, translation_y]  negative means left/up, positive means right/down
+    """
+    assert(ref.shape == test.shape)
+
+    # logger.debug(f"ref type:{type(ref)}")
+    # logger.debug(f"ref shape:{ref.shape}")
+    # logger.debug(f"ref:{ref}")
+    # logger.debug(f"test type:{type(test)}")
+    # logger.debug(f"test shape:{test.shape}")
+    # logger.debug(F"test:{test}")
+    # Align images using SIFT
+    if method == "SIFT":
+        if ransacReprojThreshold > 0.0:
+            #use RANSAC to filter feature point outliers
+            aligned_ref, aligned_test, translation = align_images_sift(ref, test, max_features=max_features, max_shift=max_shift, RANSAC=True, ransacReprojThreshold=ransacReprojThreshold)
+        else:
+            aligned_ref, aligned_test, translation = align_images_sift(ref, test, max_features=max_features, max_shift=max_shift, RANSAC=False)
+
+        # Convert translation to regular Python float
+        translation = [float(translation[0]), float(translation[1])]
+
+    elif method == "Correlate":
+        aligned_ref, aligned_test, translation = align_images_corr(ref, test)
+
+
+    # Normalize images
+    processed_ref, processed_test = normalize_images(aligned_ref, aligned_test)
+    processed_diff = processed_ref - processed_test
+    # Calculate RMSE and max absolute difference
+    rmse = float(np.sqrt(np.mean((processed_ref - processed_test) ** 2)))
+    max_diff = float(max(abs(np.max(processed_diff)), abs(np.min(processed_diff))))
+
+    def get_ceiling_floor(translation):
+        if translation < 0:
+            return -max_shift-2+int(math.floor(translation))
+        else:
+            return max_shift+2+int(math.ceil(translation))
+    int_translation = [get_ceiling_floor(t) for t in translation]
+    # Define the region of interest excluding the translation area
+    roi_start = [max(0, int_translation[0], -int_translation[0]), max(0, int_translation[1], -int_translation[1])]
+    roi_end = [min(processed_diff.shape[0], processed_diff.shape[0] + int_translation[0], processed_diff.shape[0] - int_translation[0]),
+            min(processed_diff.shape[1], processed_diff.shape[1] + int_translation[1], processed_diff.shape[1] - int_translation[1])]
+
+    # Extract the region of interest
+
+    roi_diff = processed_diff[roi_start[0]:roi_end[0], roi_start[1]:roi_end[1]]
+
+    # Find max/min positions within the region of interest
+    max_pos = [int(x) for x in np.unravel_index(roi_diff.argmax(), roi_diff.shape)]
+    min_pos = [int(x) for x in np.unravel_index(roi_diff.argmin(), roi_diff.shape)]
+    # x,y coord will be swapped because of the way numpy unravels indices
+    max_pos = [max_pos[1], max_pos[0]]
+    min_pos = [min_pos[1], min_pos[0]]
+    # Adjust positions to the original image coordinates
+    max_pos = [max_pos[0] + roi_start[0], max_pos[1] + roi_start[1]]
+    min_pos = [min_pos[0] + roi_start[0], min_pos[1] + roi_start[1]]
+
+    # Create metadata dictionary with Python native types
+    metadata = {
+        'lot_id': lot_id,
+        'defect_no': int(defect_no),
+        'translation': translation,
+        'max_difference': float(np.max(processed_diff)),
+        'min_difference': float(np.min(processed_diff)),
+        'abs_max_difference': max_diff,
+        'rmse': rmse,
+        'max_pos': max_pos,
+        'min_pos': min_pos,
+        'is_median_ref': is_median_ref  # Include the median reference flag
+    }
+
+    return metadata, processed_ref, processed_test, processed_diff, max_pos, min_pos
 
 
 

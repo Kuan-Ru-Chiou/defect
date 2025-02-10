@@ -675,5 +675,95 @@ print(f"- 漏检率: {1 - results.box.recall[2]:.4f}")
 第二部分：差异图计算
 
 metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = get_diff_map(ref, test, fn_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_thres
+###############################
+
+
+
+
+###############################lrf 回家作業#############################################
+def get_lrf_file(data_dir, selected_lot_id):
+    if os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_Classified.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_Classified.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_classified.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_classified.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}.lrf")
+    else:
+        lrf_file = None
+
+    return lrf_file
+
+def read_lrf_file(file_path):
+    with open(file_path, 'r') as file:
+        content = file.read()
+    return content
+
+def detect_defect_list(content):
+    pattern = re.compile(r'\[DefectList\]\s+DefectDataColumn.*?DefectDataList\s+\d+\s+(.*?)\s+(?=\[|$)', re.DOTALL)
+    match = pattern.search(content)
+    if match:
+        # logger.debug("DefectList found in the LRF file.")
+        return match.group(1)
+    # logger.debug("No DefectList found in the LRF file.")
+    return None
+
+def extract_no_and_classtype(defect_data):
+    # logger.debug(f"defect_data: {defect_data}")
+
+    lines = defect_data.strip().split('\n')
+    results = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 9:
+            no = parts[0]
+            classtype = parts[8]
+            results.append((no, classtype))
+    # logger.debug(f"results: {results}")
+    return results
+
+def get_defect_list(lrf_path):
+    # if data_type == "old_data":
+    file_path = lrf_path
+    content = read_lrf_file(file_path)
+    defect_data = detect_defect_list(content)
+    image_list = []
+    defect_type = []
+    if defect_data:
+        results = extract_no_and_classtype(defect_data)
+        for no, classtype in results:
+            # if classtype == '0' or classtype == '1':
+            image_list.append(no)
+            defect_type.append(classtype)
+    # logger.info(f"image_list:{image_list}")
+    return image_list, defect_type 
+
+
+
+
+[DefectList]
+DefectDataColumn No X Y W H Kind Ch PixelCount ClassType U/L ShfitDir KindBits MaskToMask Block SubBlock StripeNo Label ChgDiff Comment;
+DefectDataList 2518
+         1 -65575.3190  48572.2706      2.5000      0.8996 0000000000008c8c 00600000 254   0   2   0 0d000000000d00000008011881100f00000000000000000000000000000000000000000000000000   1   0  -1   0       -1     -999 
+         2 -65509.8190  13637.9665      1.2000      0.8496 0000000000000b08 00000060 185   0   2   0 00000000000000c40008011881100f00000000000000000000000000000000000000000000000000   1   0  -1   0       -1     -999 
+         3 -65505.8690  45174.8051      0.5000      0.1999 0000000000004b00 00000030  17   0   2   0 0080000000c004c40008011000000000000000000000000000000000000000000000000000000000   1   0  -1   0       -1     -999 
+
+        2514  63532.3185  -7693.8569      0.3250      0.1499 0000000000000b00 02000000   6   0   2   0 0000000000800c040008000000000000000000000000000000000000000000000000000000000000   1   0  -1 1076       -1     -999 
+        2515  63758.7310   9989.8003      0.7500      0.5997 000000000000000b 10000000  11  10   2   0 00000000000000330000000081100100000000000000000000000000000000000000000000000000   1   0  -1 1078       -1     -999 
+        2516  64450.4435  14399.3323      1.0750      0.7496 0000000000000b0b 00000020  60   0   2   0 00000000000000f70008211081100f00000000000000000000000000000000000000000000000000   1   0  -1 1083       -1     -999 
+        2517  64592.7935  38925.8217      2.6250      0.9495 0000000000004b4b 60000000 403   0   2   0 00b0000000c004f70008011881100f00000000000000000000000000000000000000000000000000   1   0  -1 1085       -1     -999 
+        2518  64941.1060  42573.1883      0.3500      0.4998 0000000000000100 0000000c  21  10   2   0 00000000000004040000000000000000000000000000000000000000000000000000000000000000   1   0  -1 1087       -1     -999
+
+
+
+
+
+
+
+
+
+
+
 
 

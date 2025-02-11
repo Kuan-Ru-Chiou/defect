@@ -25,6 +25,10 @@ datasets/
 
 
 
+
+
+
+
 ########################yolov11 使用預測多種類/整體   缺陷情況 sample code###########################
 
 import torch
@@ -1886,6 +1890,655 @@ def get_diff_map(ref, test, defect_no, lot_id, is_median_ref, max_features=1000,
     }
 
     return metadata, processed_ref, processed_test, processed_diff, max_pos, min_pos
+
+
+
+
+#####backend###########################################combine_db.py
+
+import sqlite3
+import json
+
+def save_json_to_sqlite(img_path, results_raw, db_path):
+    json_string = json.dumps(results_raw)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (img_path,))
+    existing_entry = cursor.fetchone()
+    if existing_entry:
+        existing_json_string = existing_entry[0]
+        if existing_json_string == json_string:
+            print("Same img_path and same results_raw. No update needed.")
+        else:
+            cursor.execute('UPDATE results_table SET results_json = ? WHERE image_path = ?', (json_string, img_path))
+            print("Same img_path but different results_raw. Updated the entry.")
+    else:
+        cursor.execute('INSERT INTO results_table (image_path, results_json) VALUES (?, ?)', (img_path, json_string))
+        print("New img_path. Inserted a new entry.")
+    conn.commit()
+    conn.close()
+    print("Connection closed")
+
+def fetch_results(image_path, db_path):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (image_path,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return json.loads(result[0])
+    return None
+
+def combine_databases(db1_path, db2_path, combined_db_path):
+    conn1 = sqlite3.connect(db1_path)
+    conn2 = sqlite3.connect(db2_path)
+    cursor1 = conn1.cursor()
+    cursor2 = conn2.cursor()
+    combined_conn = sqlite3.connect(combined_db_path)
+    combined_cursor = combined_conn.cursor()
+    combined_cursor.execute('''
+        CREATE TABLE IF NOT EXISTS results_table (
+            image_path TEXT PRIMARY KEY,
+            results_json TEXT
+        )
+    ''')
+    cursor1.execute('SELECT image_path, results_json FROM results_table')
+    entries1 = cursor1.fetchall()
+    cursor2.execute('SELECT image_path, results_json FROM results_table')
+    entries2 = cursor2.fetchall()
+    combined_entries = {}
+    for img_path, results_json in entries1:
+        combined_entries[img_path] = results_json
+    for img_path, results_json in entries2:
+        if img_path not in combined_entries:
+            combined_entries[img_path] = results_json
+    for img_path, results_json in combined_entries.items():
+        combined_cursor.execute('INSERT INTO results_table (image_path, results_json) VALUES (?, ?)', (img_path, results_json))
+    combined_conn.commit()
+    conn1.close()
+    conn2.close()
+    combined_conn.close()
+
+# Example usage
+db1_path = '/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/new_m_layer.db'
+db2_path = '/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/combined_YOLO.db'
+combined_db_path = '/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/megamind.db'
+
+combine_databases(db1_path, db2_path, combined_db_path)
+
+print(f"Combined database created at {combined_db_path}")
+
+
+
+########dbview.py
+import sqlite3
+import pandas as pd
+
+# Connect to the database
+conn = sqlite3.connect('backend/db_files/the_regional_dataset.db')
+
+# Read the data into a DataFrame
+df = pd.read_sql_query("SELECT image_path, results_json FROM results_table", conn)
+
+# Adjust display settings
+pd.set_option('display.max_colwidth', 80)
+# Display the DataFrame
+print(df)
+
+
+############sqlite_functions.py
+import json
+import sqlite3
+
+
+def save_json_to_sqlite(img_path, results_raw, db_path):
+    # Convert results_raw to JSON string
+    json_string = json.dumps(results_raw)
+
+    # Connect to SQLite database
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Check if an entry with the same img_path already exists
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (img_path,))
+    existing_entry = cursor.fetchone()
+
+    if existing_entry:
+        # Compare existing results_raw with the new one
+        existing_json_string = existing_entry[0]
+        if existing_json_string == json_string:
+            print("Same img_path and same results_raw. No update needed.")
+        else:
+            # Update the existing entry with the new results_raw
+            cursor.execute('UPDATE results_table SET results_json = ? WHERE image_path = ?', (json_string, img_path))
+            print("Same img_path but different results_raw. Updated the entry.")
+    else:
+        # Insert a new entry
+        cursor.execute('INSERT INTO results_table (image_path, results_json) VALUES (?, ?)', (img_path, json_string))
+        print("New img_path. Inserted a new entry.")
+
+    # Commit changes and close the connection
+    conn.commit()
+    conn.close()
+    print("Connection closed")
+
+
+def fetch_results(image_path, db_path):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (image_path,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return json.loads(result[0])
+    return None
+
+
+def round_to_closest_integer(db_file):
+    # Connect to SQLite database
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+
+    # Query to retrieve all rows from the results_table
+    cursor.execute('SELECT image_path, results_json FROM results_table')
+    rows = cursor.fetchall()
+
+    # Iterate over each row
+    for row in rows:
+        img_path, results_json = row
+        results = json.loads(results_json)
+
+        # Check if 'areas' key exists in the JSON
+        if 'areas' in results:
+            areas = results['areas']
+            for area_key, area_value in areas.items():
+                if area_value['object'] == 'image3':
+                    # Round x, y, width, and height to the closest integer
+                    area_value['x'] = round(area_value['x'])
+                    area_value['y'] = round(area_value['y'])
+                    area_value['width'] = round(area_value['width'])
+                    area_value['height'] = round(area_value['height'])
+
+        # Update the row with the modified JSON
+        cursor.execute('UPDATE results_table SET results_json = ? WHERE image_path = ?', (json.dumps(results), img_path))
+
+    # Commit the changes and close the database connection
+    conn.commit()
+    conn.close()
+
+if __name__ == "__main__":
+    db_file = "/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/example.db"
+    round_to_closest_integer(db_file)
+
+
+
+
+#####frontend####################### image process.py
+from PIL import Image
+import base64
+from io import BytesIO
+import numpy as np
+import json
+import cv2
+from alignment.alignment import load_defect_pair, get_diff_map
+import matplotlib.pyplot as plt
+# Function to convert a NumPy array to a Base64 encoded string
+
+def numpy_to_base64(img_array):
+    pil_img = Image.fromarray(img_array)
+    buffer = BytesIO()
+    pil_img.save(buffer, format="JPEG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+# Function to load images from a JSON file line by line and save into a dictionary
+def load_images_from_json(json_file):
+    images = {}
+    with open(json_file, 'r') as f:
+        for line in f:
+            data = json.loads(line)
+            lot_id = data['lot_id']
+            images[lot_id] = data
+    return images
+
+def apply_colormap(np_array, colormap, vmin=None, vmax=None):
+    # norm_array = (np_array - np_array.min()) / (np_array.max() - np_array.min())
+    if vmin and vmax:
+        norm_array = (np_array - vmin) / (vmax - vmin)
+    else:
+        norm_array = np_array
+    colormap_func = plt.get_cmap(colormap)
+    colored_array = colormap_func(norm_array)
+    return (colored_array[:, :, :3] * 255).astype(np.uint8)
+
+# Define a 2x2 convolution kernel
+def conv_kernel(kernel_size):
+    return np.ones((kernel_size, kernel_size), dtype=np.float32) / (kernel_size ** 2)
+
+def get_image_pair_for_studio_input(data_dir, selected_lot_id, selected_image_id, selected_image_type, vmin_level, max_features, max_shift, ransac_reproj_threshold, selected_alignment_method, conv_kernel_size):
+    img_dir = f"{data_dir}/{selected_lot_id}/{selected_lot_id}/Images/InstantReview{selected_image_type}"
+    fn_id = selected_image_id
+    ref, test, is_median_ref = load_defect_pair(img_dir, fn_id)
+    metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+        get_diff_map(ref, test, fn_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method=selected_alignment_method)
+    print(f"max_pos:{metadata['max_pos']}")
+    print(f"min_pos:{metadata['min_pos']}")
+
+    ref_colored = apply_colormap(proc_ref, 'gray')
+    test_colored = apply_colormap(proc_test, 'gray')
+    diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+    conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+    img1_base64 = numpy_to_base64(ref_colored)
+    img2_base64 = numpy_to_base64(test_colored)
+    img3_base64 = numpy_to_base64(diff_colored)
+    img4_base64 = numpy_to_base64(conv_diff_image)
+    return [img1_base64, img2_base64, img4_base64], metadata
+
+
+
+
+#########json_functions.py
+import json
+import copy
+
+def save_results_to_json(results_raw):
+    with open('results.json', 'w') as f:
+        json.dump(results_raw, f, indent=4)
+
+def sync_labels_across_3images(results_raw):
+    """
+    Syncs labels across three images by replicating 'image3' entries to 'image1' and 'image2'.
+
+    Args:
+        results_raw (dict): Dictionary containing areas information.
+
+    Returns:
+        dict: Updated dictionary with synchronized labels.
+    """
+
+    # Filter image3 entries
+    image3_entries = [area for area in results_raw['areas'].values() if area['object'] == 'image3']
+
+    # Create new list of areas with only the replicated image3 entries as image1, image2 and image3
+    areas_list = []
+    
+
+    for entry in image3_entries:
+        # Create image3 copy
+        image3_copy = copy.deepcopy(entry)
+        # image3_copy['results'][0]['value']['rectangles'][0] = image3_copy['results']['width']*image3_copy['results']['height']
+        areas_list.append(image3_copy)
+
+        # Create image2 copy
+        image2_copy = copy.deepcopy(entry)
+        image2_copy['object'] = 'image2'
+        image2_copy['results'][0]['from_name'] = 'label_image2'
+        image2_copy['results'][0]['to_name'] = 'image2'
+        image2_copy['results'][0]['id'] = f"image2{entry['results'][0]['id']}"
+        areas_list.append(image2_copy)
+
+        # Create image1 copy
+        image1_copy = copy.deepcopy(entry)
+        image1_copy['object'] = 'image1'
+        image1_copy['results'][0]['from_name'] = 'label_image1'
+        image1_copy['results'][0]['to_name'] = 'image1'
+        image1_copy['results'][0]['id'] = f"image1{entry['results'][0]['id']}"
+        areas_list.append(image1_copy)
+
+
+    # Filter image3 entries
+    image6_entries = [area for area in results_raw['areas'].values() if area['object'] == 'image6']
+
+
+    
+
+    for entry in image6_entries:
+        # Create image3 copy
+        image6_copy = copy.deepcopy(entry)
+        # image3_copy['results'][0]['value']['rectangles'][0] = image3_copy['results']['width']*image3_copy['results']['height']
+        areas_list.append(image6_copy)
+
+        # Create image5 copy
+        image5_copy = copy.deepcopy(entry)
+        image5_copy['object'] = 'image5'
+        image5_copy['results'][0]['from_name'] = 'label_image5'
+        image5_copy['results'][0]['to_name'] = 'image5'
+        image5_copy['results'][0]['id'] = f"image5{entry['results'][0]['id']}"
+        areas_list.append(image5_copy)
+
+        # Create image4 copy
+        image4_copy = copy.deepcopy(entry)
+        image4_copy['object'] = 'image4'
+        image4_copy['results'][0]['from_name'] = 'label_image4'
+        image4_copy['results'][0]['to_name'] = 'image4'
+        image4_copy['results'][0]['id'] = f"image4{entry['results'][0]['id']}"
+        areas_list.append(image4_copy)
+
+    # Update results_raw dictionary
+    results_raw['areas'] = dict(enumerate(areas_list))
+
+    return results_raw
+
+def get_area_size(results_raw):
+    image3_entries = [area for area in results_raw['areas'].values() if area['object'] == 'image3']
+    size_list = []
+    for entry in image3_entries:
+        size_list.append(float(entry['width'])*float(entry['height'])*10000/(256**2))
+    return size_list
+
+
+
+#########label_config.py
+# poly_rec_config = """
+# <View>
+#   <Header value="Select label and click the image to start"/>
+#   <View>
+#     <View style="display: flex;">
+#       <View style="width: 33%; margin-right: 1%;">
+#         <Image name="image1" value="$image1"/>
+#         <PolygonLabels name="label1_image1" toName="image1">
+#           <Label value="Poly_Defect" background="green"/>
+#         </PolygonLabels>
+#         <RectangleLabels name="label2_image1" toName="image1">
+#           <Label value="Rec_Defect" background="blue"/>
+#         </RectangleLabels>
+#       </View>
+#       <View style="width: 33%; margin-right: 1%;">
+#         <Image name="image2" value="$image2"/>
+#         <PolygonLabels name="label1_image2" toName="image2">
+#           <Label value="Poly_Defect" background="green"/>
+#         </PolygonLabels>
+#         <RectangleLabels name="label2_image2" toName="image2">
+#           <Label value="Rec_Defect" background="blue"/>
+#         </RectangleLabels>
+#       </View>
+#       <View style="width: 33%;">
+#         <Image name="image3" value="$image3"/>
+#         <PolygonLabels name="label1_image3" toName="image3">
+#           <Label value="Poly_Defect" background="green"/>
+#         </PolygonLabels>
+#         <RectangleLabels name="label2_image3" toName="image3">
+#           <Label value="Rec_Defect" background="blue"/>
+#         </RectangleLabels>
+#       </View>
+#     </View>
+#   </View>
+
+# </View>
+# """
+
+config = """
+<View>
+  <Header value="Select label and click the image to start"/>
+  <View>
+    <View style="display: flex;">
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image1" value="$image1" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image1" toName="image1">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image2" value="$image2" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image2" toName="image2">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%;">
+        <Image name="image3" value="$image3" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image3" toName="image3">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+    </View>
+  </View>
+
+</View>
+"""
+
+
+two_row_config="""
+<View>
+  <Header value="Select label and click the image to start"/>
+  <View>
+    <Header value="Category: T"/>
+    <View style="display: flex;">
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image1" value="$image1" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image1" toName="image1">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image2" value="$image2" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image2" toName="image2">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%;">
+        <Image name="image3" value="$image3" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image3" toName="image3">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+    </View>
+    <Header value="Category: Rt"/>
+    <View style="display: flex; margin-top: 1%;">
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image4" value="$image4" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image4" toName="image4">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image5" value="$image5" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image5" toName="image5">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%;">
+        <Image name="image6" value="$image6" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image6" toName="image6">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+    </View>
+  </View>
+</View>
+"""
+
+
+interfaces = [
+  "panel",
+  "update",
+  "controls",
+  "side-column",
+  "completions:menu",
+  "completions:add-new",
+  "completions:delete",
+  "predictions:menu",
+],
+
+user = {
+  'pk': 1,
+  'firstName': "Labeler",
+  'lastName': "",
+},
+
+######app.py
+import streamlit as st
+from streamlit_labelstudio import st_labelstudio
+import cv2
+from alignment.alignment import load_defect_pair, get_diff_map
+from frontend.image_processor import numpy_to_base64, load_images_from_json, get_image_pair_for_studio_input, apply_colormap, conv_kernel
+from frontend.label_config import config, interfaces, user, two_row_config
+from prelabel.prelabel import task_generator
+from frontend.read_lrf import get_defect_list, get_lrf_file
+from backend.sqlite_functions import save_json_to_sqlite, fetch_results
+from frontend.json_functions import save_results_to_json, sync_labels_across_3images, get_area_size
+import sqlite3
+import os
+import traceback
+import argparse
+from loguru import logger
+
+# modify the .db filename if you want a fresh start (will create file for you)
+db_path = "backend/db_files/the_regional_dataset.db"
+# pass in trained model checkpoint (currently only supports YOLO)
+model_path = "/home/hubert007/Code/label_tool/labeling/runs/detect/megamind_nojit_vmin_fix/weights/best.pt"
+
+st.set_page_config(layout='wide')
+
+# Initialize session state for results_raw and image index
+if 'previous_results_raw' not in st.session_state:
+    st.session_state.previous_results_raw = None
+if 'image_index' not in st.session_state:
+    st.session_state.image_index = 0
+if 'lot_index' not in st.session_state:
+    st.session_state.lot_index = 0
+
+# Function to check if results_raw has changed
+def has_results_raw_changed(current_results_raw):
+    previous_results_raw = st.session_state.previous_results_raw
+    if previous_results_raw != current_results_raw:
+        st.session_state.previous_results_raw = current_results_raw
+        return True
+    return False
+
+
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS results_table (
+    id INTEGER PRIMARY KEY,
+    image_path TEXT,
+    results_json TEXT
+)
+''')
+conn.commit()
+conn.close()
+
+
+# Sidebar for directory-like structure
+st.sidebar.title('Image Directory')
+
+data_dir = "/mnt/fs0/dataset/Layer_M"  
+items = os.listdir(data_dir)
+
+# Filter out only directories
+lot_ids = [item for item in items if os.path.isdir(os.path.join(data_dir, item)) and item != 'log']
+lot_ids.sort()
+try:
+    selected_lot_id = st.sidebar.selectbox('Select Lot ID', lot_ids, index=st.session_state.lot_index)
+except:
+    selected_lot_id = st.sidebar.selectbox('Select Lot ID', lot_ids, index=0)
+# selected_image_type = st.sidebar.selectbox('Select Image Type', ["T", "Rt"], index=0)
+
+lrf_file = get_lrf_file(data_dir, selected_lot_id)
+
+
+# logger.debug(f"lrf_file: {lrf_file}")
+defect_images_id_list, defect_type = get_defect_list(lrf_file)
+
+
+
+# Skip to the next image_id when the button is clicked
+if st.sidebar.button('Previous Image'):
+    st.session_state.image_index -= 1
+    if st.session_state.image_index < 0:
+        st.session_state.lot_index = (st.session_state.lot_index - 1) % len(lot_ids)
+        selected_lot_id = lot_ids[st.session_state.lot_index]
+        lrf_file = get_lrf_file(data_dir, selected_lot_id)
+        defect_images_id_list, defect_type = get_defect_list(lrf_file)
+        st.session_state.image_index = len(defect_images_id_list) - 1
+
+# Go to the previous image_id when the button is clicked
+if st.sidebar.button('Next Image'):
+    st.session_state.image_index += 1
+    if st.session_state.image_index >= len(defect_images_id_list):
+        st.session_state.image_index = 0
+        st.session_state.lot_index = (st.session_state.lot_index + 1) % len(lot_ids)
+        selected_lot_id = lot_ids[st.session_state.lot_index]
+        lrf_file = get_lrf_file(data_dir, selected_lot_id)
+        defect_images_id_list, defect_type = get_defect_list(lrf_file)
+
+# logger.debug(f"image_id_list:{defect_images_id_list}")
+try:
+    selected_image_id = st.sidebar.selectbox('Select Image ID', defect_images_id_list, index=st.session_state.image_index)
+except:
+    selected_image_id = '1'
+# try:
+st.session_state.image_index = defect_images_id_list.index(selected_image_id)
+# except:
+#     st.session_state.image_index = 1
+st.write(f"defect type : {defect_type[st.session_state.image_index]}")
+
+prelabel_methods = ['minmax', 'YOLO']
+selected_prelabel_method = st.sidebar.selectbox('Select prelabel method', prelabel_methods, index=0)
+
+alignment_methods = ['SIFT', 'Correlate']
+selected_alignment_method = st.sidebar.selectbox('Select alignment method', alignment_methods, index=0)
+
+# Slider for saturation adjustment
+vmin_level = st.sidebar.slider('vmin_level', -2.0, 0.0, -0.5)
+max_features = st.sidebar.slider('max_features', 20.0, 1000.0, 1000.0, 20.0)
+max_shift = st.sidebar.slider('max_shift', 0.0, 20.0, 10.0)
+ransac_reproj_threshold = st.sidebar.slider('ransac_reproj_threshold', 0.0, 0.3, 0.10, 0.01)
+crop_size = st.sidebar.slider('crop_size', 1.0, 30.0, 15.0, 1.0)
+conv_kernel_size = st.sidebar.slider('conv_kernel_size', 1.0, 10.0, 2.0, 1.0)
+
+
+T_images, T_metadata = get_image_pair_for_studio_input(data_dir, selected_lot_id, selected_image_id, "T", vmin_level, max_features, max_shift, ransac_reproj_threshold, selected_alignment_method, conv_kernel_size)
+Rt_images, Rt_metadata = get_image_pair_for_studio_input(data_dir, selected_lot_id, selected_image_id, "Rt", vmin_level, max_features, max_shift, ransac_reproj_threshold, selected_alignment_method, conv_kernel_size)
+
+images_base64 = [T_images[0], T_images[1], T_images[2], Rt_images[0], Rt_images[1], Rt_images[2]]
+metadatas = [T_metadata, Rt_metadata]
+
+config = two_row_config
+
+img_path = f"{data_dir}, {selected_lot_id}, {selected_image_id}"
+existing_labels = fetch_results(img_path, db_path)
+if not existing_labels:
+    results_raw = st_labelstudio(config, interfaces, user, task_generator(images_base64, crop_size, metadatas=metadatas, method=selected_prelabel_method, model_path=model_path))
+else:
+    print("Labels already exist. Using existing Labels.")
+    st.write("Using existing labels.")
+    results_raw = st_labelstudio(config, interfaces, user, task_generator(images_base64, crop_size, method=selected_prelabel_method, existing_labels=existing_labels))
+if results_raw is not None and has_results_raw_changed(results_raw):
+    results_raw = sync_labels_across_3images(results_raw)
+    # save_results_to_json(results_raw)
+    # st.write(f"label areas:{get_area_size(results_raw)}")
+    save_json_to_sqlite(img_path, results_raw, db_path)
+    st.session_state.image_index += 1
+    if st.session_state.image_index >= len(defect_images_id_list):
+        st.session_state.image_index = 0
+        st.session_state.lot_index = (st.session_state.lot_index + 1) % len(lot_ids)
+        selected_lot_id = lot_ids[st.session_state.lot_index]
+        lrf_file = get_lrf_file(data_dir, selected_lot_id)
+        defect_images_id_list, defect_type = get_defect_list(lrf_file)    
+    st.rerun()
+
+
+
+
 
 
 

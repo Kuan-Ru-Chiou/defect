@@ -2541,4 +2541,54 @@ if results_raw is not None and has_results_raw_changed(results_raw):
 
 
 
+####YOLO prelabeler training
+
+Prepare dataset
+Run commands under /toggle_labelstudio
+After finishing labeling, you will get .db file under /toggle_labelstudio.
+Convert that .db file into YOLO training format by running the following command:
+
+python -m model_based.YOLO.dataset --db_file example.db --json_metadata example.json --dataset_path dataset_path --use_diff_map
+
+Train model
+
+run finetune
+
+python -m model_based.YOLO.finetune --epochs 200 --imgsz 256 --exp_name "experiment name" --dataset_path "dataset_path"
+Other arguments will be added later(TODO)
+
+
+
+
+######Toggle Label Studio
+
+Quickstart
+
+install dependencies
+
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+run the script
+
+streamlit run app.py
+This will load the False Negatives images classified by FF (just for demo).
+
+You can toggle around visualization paramters on the left.
+Click on Predictions to see the rule-based predictions(using min/max diff on diff map).
+Edit these predictions if necessary by clicking again on Predictions.
+Only edit on Diff Map (3rd image) for now. Edits on the image1,2 won't be saved.
+Click on Submit to save annotations to backend.
+
+
+
+
+
+
+
+
+
+
+
 

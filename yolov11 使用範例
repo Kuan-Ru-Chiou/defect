@@ -2806,3 +2806,788 @@ I think the R and B channel are swapped. I'm not sure if this is a bug or just a
 
 
 
+
+
+
+
+1. 整体概览
+这份代码主要用于缺陷检测与标注，包含以下几个大模块：
+
+缺陷文件读取与解析
+读取存储缺陷信息的文件（.lrf 格式），提取出每个缺陷的编号与分类信息。
+
+图像加载、预处理与差分计算
+读取图像（测试图与参考图），对图像进行配准、对齐以及差分（diff map）计算，并将处理结果转换为便于前端展示的格式（例如 Base64 编码）。
+
+缺陷配准与对齐（Alignment 模块）
+利用 SIFT 或 Correlation 方法对图像进行配准，计算出参考图与测试图之间的平移、差异信息，以及最大、最小差分点（用来辅助预标注）。
+
+预标注（Prelabeling）与推断
+通过已训练好的 YOLO 模型对图像进行目标检测，得到缺陷候选框；或使用基于差分图的最小/最大值位置生成预设边界框（minmax 方法）。
+
+数据集构建与图像增强
+将标注数据从数据库或 JSON 中提取出来，按照比例划分成训练、验证、测试集，同时利用 albumentations 进行图像增强（旋转、翻转、缩放等）。
+
+前端界面与标注交互
+利用 Streamlit 结合 Label Studio 的组件构建前端标注界面，加载图像、预标注信息，并将用户的修改结果保存到数据库中。
+
+数据库操作与结果同步
+对标注结果进行存储、更新以及合并操作，保证数据的一致性，同时将预标注结果同步到各个图像视图中（例如 image1、image2、image3）。
+
+
+
+
+2. 各模块详细解析
+2.1 缺陷文件读取与解析
+主要函数：
+
+get_lrf_file(data_dir, selected_lot_id)
+根据数据目录与选择的批次（lot）ID，查找对应的 .lrf 文件。由于文件命名可能有多种格式（如 _ADD.lrf、_Classified.lrf、或直接 .lrf），函数依次判断各个可能的文件路径，返回存在的那个路径。
+
+read_lrf_file(file_path)
+简单地以文本模式读取指定文件的内容。
+
+detect_defect_list(content)
+使用正则表达式查找文本中 “[DefectList]” 标签开始的部分，并提取出缺陷数据列表所在的段落。
+
+extract_no_and_classtype(defect_data)
+将提取出的缺陷数据按行拆分，每一行根据空格分隔后，提取第一列（缺陷编号）和第九列（缺陷分类类型）。返回一个编号与分类类型的元组列表。
+
+get_defect_list(lrf_path)
+综合调用上面几个函数：读取文件内容 → 检测缺陷数据段 → 提取编号和类型，并最终返回一个包含图像编号列表和对应缺陷类型的元组。
+
+【总结】
+这部分代码主要负责解析存放缺陷信息的文件，提取出每个缺陷在图像中的标识（例如缺陷编号）以及它的分类，用于后续图像加载和标注展示。
+
+
+
+
+2.2 图像处理与预处理
+关键功能与函数：
+
+图像转换与编码
+
+numpy_to_base64(img_array)：将 NumPy 数组形式的图像转换为 PIL 图片，然后保存为 JPEG 格式，通过 BytesIO 转换为 Base64 编码字符串，方便在前端（如 HTML 中）展示图像。
+加载与颜色映射
+
+load_images_from_json(json_file)：按行读取 JSON 文件，将图像信息存储在字典中（一般用于加载预处理好的图像元数据）。
+apply_colormap(np_array, colormap, vmin, vmax)：对传入的灰度或差分图像应用颜色映射。例如，将灰度图用“gray”映射，将差分图用“seismic”映射，并根据 vmin 与 vmax 参数对数值范围做归一化，返回 RGB 格式的图像数组。
+卷积核定义
+
+conv_kernel(kernel_size)：生成一个大小为 kernel_size 的均值卷积核，用于图像平滑操作，常见于对差分图进行卷积处理以增强局部特征。
+生成前端输入图像对
+
+get_image_pair_for_studio_input(...)：
+根据传入的数据目录、选中的 lot ID 和图像编号，定位存放测试图和参考图的文件夹。
+调用 load_defect_pair（在 alignment 模块中）获得参考图和测试图，并确定是否使用中位图作为参考。
+使用 get_diff_map 计算出两幅图像之间的差分图，同时得到一些元数据（例如最大差异点和最小差异点的位置）。
+对配准后的参考图、测试图和差分图应用颜色映射，再对差分图做卷积滤波处理。
+将这些图像转换成 Base64 字符串，返回给前端显示，同时返回包含对齐与差分信息的元数据。
+【总结】
+这一模块主要实现图像的读取、预处理和转换，以便后续缺陷检测和前端标注界面的展示。关键步骤在于计算“差分图”，帮助突出显示缺陷区域。
+
+
+
+2.3 缺陷配准与差分计算（Alignment 模块）
+核心函数：
+
+load_defect_pair(img_path, defect_no)
+根据给定的图像目录与缺陷编号，从多个可能的后缀（例如 “L”, “U”, “L_p”, “U_p”）中寻找对应的参考图和测试图。
+
+如果测试图只有一张，则将其作为主要图像；如果有多张参考图（例如左右两个方向），则会根据图像数量决定是否使用中位图作为参考图。
+get_diff_map(ref, test, defect_no, lot_id, is_median_ref, max_features, max_shift, ransacReprojThreshold, method)
+
+根据选择的方法（SIFT 或 Correlate）对参考图和测试图进行对齐（图像配准）。
+对对齐后的图像进行归一化处理，计算出两幅图像的差分图。
+在图像的 ROI 区域内找到差分最大的点与最小的点，这通常对应缺陷区域。
+同时计算 RMSE（均方根误差）、最大绝对差分等指标，生成一个包含所有这些信息的元数据字典。
+【总结】
+这一部分是整个缺陷分析的核心，通过图像对齐与差分计算，可以自动定位出图像中的异常区域，从而辅助后续的标注与检测工作。
+
+
+
+2.4 推断与预标注
+主要流程：
+
+YOLO 模型推断
+
+inference(img_np, ckpt)：
+加载预训练或 fine-tune 后的 YOLO 模型。
+对输入图像（可能经过预处理转换为 RGB 格式）进行目标检测。
+遍历检测到的边界框，提取出边界框的坐标（x1, y1, x2, y2）、宽度、高度以及类别标签，构成预标注数据。
+预标注逻辑
+
+在 YOLO_prelabel 中，将通过 YOLO 推断得到的边界框转换成符合 Label Studio 标注格式的数据（以百分比表示位置与尺寸），并为不同视图（例如 image1~image6）生成相应的预标注信息。
+同时，代码中还支持另一种预标注方法（minmax），即利用差分图中的最大/最小点位置生成固定大小的缺陷区域。
+【总结】
+这一模块利用深度学习模型和规则方法为图像自动生成缺陷候选框，减少人工标注的工作量，也为后续模型的训练提供初始数据。
+
+
+
+2.5 数据集构建与图像增强
+主要功能：
+
+数据库与元数据转换
+
+db_to_metadata：从 SQLite 数据库中提取原始标注信息，转换成 JSON 格式的元数据文件。
+数据集创建
+
+create_dataset：
+根据提供的数据库与 JSON 文件，将数据划分为训练集、验证集和测试集（例如 70%/20%/10%）。
+针对每个图像，调用 get_diff_map 及图像增强函数对图像进行预处理，并保存为 PNG 文件；同时生成对应的标注文本文件。
+图像增强部分采用 albumentations 库进行旋转、翻转、仿射变换等操作，以扩充数据集，增加模型的鲁棒性。
+数据集检查
+
+dataset_checker：扫描数据集目录，检查是否有图像对应的标注文件缺失或为空，帮助排查数据准备过程中的问题。
+【总结】
+这一模块主要负责将标注数据转换为 YOLO 模型训练所需要的格式，并通过数据增强来丰富训练样本，确保模型训练时具有足够的多样性。
+
+
+
+
+2.6 前端标注与交互（使用 Label Studio 与 Streamlit）
+主要部分：
+
+前端展示
+
+利用 Streamlit 构建 Web 应用（app.py），在侧边栏中提供目录选择（例如 lot ID、图像编号），动态加载对应的图像及预标注信息。
+图像以 Base64 编码的形式传给前端组件，方便在网页中直接显示。
+Label Studio 组件集成
+
+通过 st_labelstudio 组件（基于 deneland/streamlit-labelstudio），构建交互式标注界面。
+标注界面配置（如 config、interfaces、user 等）定义了如何展示图像（如分为左右或两行显示）、标注类型（矩形标注、标签颜色等）。
+用户在界面上可以修改预标注信息，最终点击提交后，将标注数据以 JSON 格式返回并保存到 SQLite 数据库中。
+预标注结果同步
+
+sync_labels_across_3images：将一个视图（例如 image3）的标注信息复制同步到其他视图（例如 image1、image2），确保前端展示时各个图像的标注保持一致。
+【总结】
+前端部分主要是与用户交互，加载图像和预标注、显示标注界面、捕获用户修改后返回的数据，并将这些数据保存到后端数据库中。
+
+
+
+2.7 数据库操作与其他辅助模块
+主要功能：
+
+数据库读写与合并
+
+提供了 save_json_to_sqlite、fetch_results、combine_databases 等函数，用于存储、查询和合并标注结果。
+这些函数保证同一图像多次标注时不会重复写入，同时支持更新已有数据。
+导出与后处理
+
+export_json_and_mask.py：从数据库中提取数据，生成最终的 JSON 元数据文件，并对图像进行遮罩处理（将缺陷区域透明化或突出显示），方便后续使用。
+其他辅助函数
+
+如 check_image_variants 用于处理不同后缀图像（例如左、右、上、下）的查找，确保在存在多种版本的图像时能正确选取。
+【总结】
+这一部分确保整个系统的数据能够稳定存储、更新和导出，同时为后续模型训练和结果展示提供必要的支撑。
+
+
+
+
+3. 流程图示与工作原理
+数据读取
+
+系统从数据目录中读取 .lrf 文件，通过正则解析提取缺陷编号和类型。
+图像配准与差分计算
+
+根据缺陷编号加载测试图和参考图，利用 SIFT 或 Correlation 对图像进行配准，对齐后计算差分图，并得到最大/最小差分点位置等元数据。
+预标注生成
+
+利用预训练 YOLO 模型（或 minmax 规则）对图像进行缺陷检测，生成初步的边界框预标注，转换成 Label Studio 所需的格式。
+前端展示与人工标注
+
+前端使用 Streamlit 与 Label Studio 组件展示图像和预标注，用户可以进行修改或确认，然后提交标注结果。
+数据存储与数据集构建
+
+提交后的标注结果存入 SQLite 数据库，同时可以利用这些数据构建用于训练 YOLO 模型的数据集（包括图像增强和格式转换）。
+模型训练与迭代改进
+
+利用构建好的数据集进行 YOLO 模型的 fine-tuning，训练后得到的模型可用于下一轮的预标注，从而不断迭代改进缺陷检测效果。
+
+
+4. 总结
+总体来说，这套系统采用了模块化设计，将缺陷文件解析、图像处理、配准差分计算、预标注生成、前端交互标注以及数据存储和模型训练等功能分别实现。对初学者来说，可以按以下思路来理解和逐步学习：
+
+先理解数据输入部分：如何从 .lrf 文件中提取缺陷信息，并根据编号加载对应图像。
+再了解图像对齐与差分计算：重点理解 load_defect_pair 与 get_diff_map 的处理流程，这部分直接影响后续缺陷定位。
+掌握预标注生成逻辑：学习如何利用深度学习模型（YOLO）和规则方法生成初始的标注结果。
+最后关注前端交互与数据存储：理解如何通过 Streamlit 与 Label Studio 组件构建用户标注界面，以及如何将标注结果存储到数据库中以便后续使用。
+
+
+
+
+
+1. 前端展示与人工标注
+主要文件与组件
+app.py
+这是整个前端交互的入口，利用 Streamlit 构建了一个 Web 应用，同时集成了 Label Studio 的标注组件（通过 st_labelstudio）来展示图像和预标注信息。
+
+Label Studio 组件
+前端通过调用 st_labelstudio(config, interfaces, user, task) 来启动标注界面。这里的各个参数说明如下：
+
+config：定义了标注界面的布局和功能，比如显示哪些图像（如 image1、image2、image3 或更多），以及允许用户使用哪种标注方式（如矩形标注）。
+interfaces：配置了侧边栏、更新、添加、删除等内置功能。
+user：标明当前标注用户的信息。
+task：由 task_generator 函数生成的任务数据，包含了前端需要展示的图像数据（通常是 Base64 编码的字符串）以及预标注的边界框信息。
+在 task_generator 中，可以看到它会判断是否存在“已有标注”（existing_labels），如果没有，则调用预标注逻辑（例如 YOLO 或 minmax 方法）来生成初步的缺陷候选框，然后将结果格式化为符合 Label Studio 要求的数据结构。
+当用户在界面上修改或确认后，提交的数据将以 JSON 格式返回给 Streamlit。
+
+
+前端工作流程
+图像加载与预处理
+
+在 app.py 中，首先通过读取存储图像信息的文件夹（例如数据目录下的 lot 文件夹），根据当前选中的 lot ID 和图像编号调用函数 get_image_pair_for_studio_input 来获取处理好的图像（参考图、测试图、差分图）。
+这些图像经过颜色映射、卷积滤波等处理后会被转换为 Base64 字符串，方便直接在 HTML 中嵌入显示。
+任务构建
+
+调用 task_generator 函数，构造一个任务（task）。任务中包含了六个图像视图（如 image1 ~ image6），每个图像对应的内容（例如灰度图、差分图等）会以 data:image/jpeg;base64,…… 的格式传递到前端。
+同时，根据预设的预标注方法（YOLO 或 minmax），生成初步的标注信息（例如缺陷候选框），这些预标注结果也会传入 task 中。
+用户交互
+
+用户在 Label Studio 的界面上可以查看预标注结果，并根据需要进行修改（例如调整边界框的位置或尺寸）。
+提交标注后，st_labelstudio 组件会返回更新后的标注结果（JSON 格式），代码中通过 has_results_raw_changed 判断是否有更新，并最终将结果进行保存。
+
+
+
+2. 数据存储与数据集构建
+数据存储部分
+数据库操作
+在代码中，SQLite 被用来存储每次标注的结果。主要使用了如下函数：
+
+save_json_to_sqlite
+该函数负责将标注结果（一个 JSON 字符串）与对应的 image_path 存入数据库。逻辑包括：
+首先检查当前图片是否已经存在标注记录。
+如果存在且内容发生变化，则更新记录；否则直接插入新的记录。
+fetch_results
+根据给定的 image_path 从数据库中获取之前保存的标注结果，用于在重新加载任务时（例如用户重新进入页面）显示已有标注。
+前端与数据库的衔接
+在 app.py 中，当用户提交标注结果后，程序会调用 save_json_to_sqlite 将新的标注数据保存到 SQLite 数据库中，然后通过更新 session 状态（例如 image_index、lot_index）实现切换到下一张图像，并调用 st.rerun() 刷新页面。
+
+数据集构建部分
+创建数据集的主要函数：create_dataset
+这一部分的代码通常位于用于模型训练的模块中（例如 prelabel/model_based/YOLO/dataset.py），主要流程如下：
+
+提取标注信息
+通过调用 db_to_metadata 函数，从 SQLite 数据库中提取所有标注记录，将它们转换成一个 JSON 格式的元数据文件。每条记录包含了图像路径和对应的缺陷边界框信息。
+数据集划分
+利用 train_test_split 将数据分为训练集、验证集和测试集。划分比例通常是 70% 训练、20% 验证、10% 测试。
+图像增强与预处理
+对于每个数据项，读取图像文件，调用 get_diff_map（如果使用差分图作为输入）和图像增强函数（如 process_and_augment_images）。
+图像增强主要使用了 albumentations 库，实现随机旋转、翻转、仿射变换等，从而增加数据多样性，扩充训练样本数量。
+增强后的图像会保存为 PNG 文件，同时生成对应的标注文本文件，文本中记录了每个标注框的坐标（转换为相对于图像尺寸的百分比）。
+数据集检查
+最后，调用 dataset_checker 对数据集目录进行扫描，检查是否有图像文件缺失或标注文件为空，确保数据集完整无误。
+数据集构建目的
+整个数据集构建流程的目标是将从前端获得的标注数据（保存在 SQLite 中）转换成符合 YOLO 模型训练要求的格式，包括图像文件和对应的标注（通常为文本格式），同时通过图像增强来提高模型的泛化能力。
+
+
+
+总结
+前端展示与人工标注
+前端部分主要通过 Streamlit 和 Label Studio 组件实现。代码先加载图像（经过预处理与差分计算），构造任务并展示给用户，用户可以修改预标注结果，最终将标注结果以 JSON 格式返回。
+
+数据存储与数据集构建
+用户提交的标注数据被保存到 SQLite 数据库中，通过函数 save_json_to_sqlite 实现；同时，通过从数据库中提取标注信息构建元数据，利用数据集构建代码对图像进行划分和增强，生成用于 YOLO 模型训练的完整数据集。
+
+
+
+在 save_json_to_sqlite 中，当你传入一个 img_path（实际上就是 image_path）时，函数会先检查数据库中是否已有该 image_path 对应的记录：
+
+如果存在且内容一致，则不做更新；
+如果存在但内容不同，则更新这条记录；
+如果不存在，则插入新的记录。
+在 fetch_results 中，同样使用传入的 image_path 去数据库中查找对应的标注结果，并返回它。
+
+因此，为了能够正确查找和更新相应的记录，这两个函数中使用的 image_path 应该是同样的——也就是代表同一张图片的唯一标识符。简单来说，是的，它们指代的应该是同样的东西。
+
+
+1. 页面初始化与状态管理
+页面设置与 Session State
+在 app.py 开头，会调用
+
+python
+複製
+st.set_page_config(layout='wide')
+设置页面布局为宽屏模式。接着，通过检查 st.session_state 中是否存在 'previous_results_raw'、'image_index' 和 'lot_index'，来初始化这些状态变量。这些变量用于记录当前展示的图像索引、批次（lot）索引以及上一次提交的标注结果，确保页面刷新时状态能够保持同步。
+
+数据库初始化
+代码在启动时会检查并创建 SQLite 数据库和对应的表：
+
+python
+複製
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS results_table (
+    id INTEGER PRIMARY KEY,
+    image_path TEXT,
+    results_json TEXT
+)
+''')
+conn.commit()
+conn.close()
+这里 results_table 表中使用 image_path 作为唯一标识，用来保存每张图像对应的标注数据（JSON 格式）。
+
+
+
+2. 侧边栏选择与图像索引更新
+数据目录与批次（lot）选择
+代码通过 os.listdir(data_dir) 获取数据目录下的所有文件夹，并过滤出批次文件夹（排除如 log 目录）。接着使用
+
+python
+複製
+st.sidebar.selectbox('Select Lot ID', lot_ids, index=st.session_state.lot_index)
+让用户选择一个批次。此时根据选中的批次 ID，利用 get_lrf_file 函数获取对应的缺陷文件（.lrf），再调用 get_defect_list 得到当前批次中所有缺陷图像的 ID 列表和缺陷类型信息。
+
+图像索引的前进与后退
+在侧边栏中还设置了“Previous Image”和“Next Image”按钮，点击后会更新 st.session_state.image_index（以及在到达边界时更新 lot_index）。这样可以方便用户浏览当前批次中的所有图像，系统会根据更新后的索引重新加载对应图像。
+
+图像编号选择
+根据更新后的索引，通过 st.sidebar.selectbox('Select Image ID', defect_images_id_list, index=st.session_state.image_index) 来确定当前要展示的图像编号。
+
+
+3. 图像预处理与任务构建
+参数设置
+用户可以在侧边栏通过滑块调整各项参数，如 vmin_level（用于颜色映射）、max_features、max_shift、ransac_reproj_threshold、crop_size（用于后续生成预标注的框大小）以及 conv_kernel_size（用于卷积滤波）。这些参数将影响后续图像配准与差分图生成的效果。
+
+获取处理后的图像
+调用函数 get_image_pair_for_studio_input 分别为两类图像（标记为 "T" 和 "Rt"）进行处理：
+
+内部流程：
+
+根据选中的数据目录、批次 ID 与图像编号，定位存放图像的目录。
+调用 load_defect_pair 获取参考图和测试图（同时判断是否需要使用中位图作为参考）。
+通过 get_diff_map 对两幅图像进行配准和差分计算，获得对齐后的图像、差分图以及相关元数据（例如最大、最小差分点的位置）。
+使用 apply_colormap 对图像进行颜色映射，差分图经过卷积滤波处理后转换成 Base64 字符串。
+最终返回一个包含 Base64 编码图像（通常为参考图、测试图和处理后的差分图）的列表，以及差分图的元数据。
+
+任务数据构建
+将 “T” 类图像和 “Rt” 类图像的 Base64 字符串分别组合成一个 images_base64 列表（总共6个图像视图），同时构造一个 metadatas 列表保存相应的元数据。接着，调用 task_generator 函数生成任务：
+
+如果在数据库中没有该图像的已有标注（通过调用 fetch_results 检查），则调用 generate_prelabels 自动生成预标注（例如基于 YOLO 或 minmax 方法）。
+如果已有标注，则将其直接作为任务的一部分展示，方便用户修改。
+最终，任务数据格式为一个字典，内容大致如下：
+
+
+task = {
+    'completions': [],
+    'predictions': [{
+        'model_version': 'prelabeling' 或 'existing_labels',
+        'result': annotations  # 标注信息，包含每个图像的矩形框及标签
+    }],
+    'id': 1,
+    'data': {
+        'image1': "data:image/jpeg;base64,...",
+        'image2': "data:image/jpeg;base64,...",
+        ...  # 其他图像视图
+    }
+}
+
+
+4. 前端标注与提交
+Label Studio 组件调用
+调用
+
+python
+複製
+results_raw = st_labelstudio(config, interfaces, user, task_generator(...))
+将任务传给 Label Studio 组件。在这个标注界面中，用户可以查看所有预处理好的图像和预标注结果，并对预标注的缺陷边界框进行微调或修改。
+
+标注提交与结果更新
+当用户点击“Submit”后，组件会返回标注结果（JSON 格式），存放在 results_raw 中。接下来：
+
+通过函数 has_results_raw_changed 检查此次提交的标注数据与之前是否发生了变化。
+如果变化存在，则调用 sync_labels_across_3images 将部分标注（例如 image3 的标注）同步到其它视图，确保前端显示的一致性。
+最后，调用 save_json_to_sqlite 将最终的标注结果存入数据库中，并更新 image_index（自动切换到下一张图像），最后通过 st.rerun() 刷新页面。
+
+
+5. 整个前端工作流程总结
+初始化与状态管理：页面加载时设置好显示格式和初始状态（当前图像、批次以及数据库初始化）。
+侧边栏选择：用户在侧边栏选择批次和图像编号，并通过按钮控制前进/后退，更新 Session 状态。
+图像加载与预处理：根据选定的图像编号，调用图像预处理函数获取参考图、测试图及差分图，处理后的图像以 Base64 形式保存。
+任务构建与预标注生成：利用 task_generator 构建任务数据，任务中包含图像和预标注信息，若已有标注则直接加载，否则生成预标注。
+交互标注与结果提交：用户在 Label Studio 组件中修改标注后，提交结果；系统检查数据变化后同步、保存，并自动切换到下一图像，整个页面刷新更新显示。
+通过这一系列步骤，前端实现了从图像加载、预标注生成，到用户交互和标注结果存储的完整工作流程，使得缺陷标注过程既自动化又便于人工校正。
+
+
+Lot ID
+表示一个批次或一组图像的标识符。它通常对应数据目录中的一个文件夹，里面包含了同一批次的所有图像和相关缺陷信息。通过选择不同的 Lot ID，你就可以切换到不同的数据批次。
+
+Image ID
+表示在某个特定批次（Lot）中的单张图像的标识符。它用来确定具体哪张图像需要处理、展示或者标注。比如在一个批次内，可能有数百张图像，每张图像都有唯一的 Image ID，用来区分这些图像。
+
+
+下面详细说明“图像预处理与任务构建”这部分的代码逻辑和流程，帮助你理解系统如何从原始图像生成适合前端标注任务的数据。
+
+1. 图像预处理
+a. 参数设置
+在侧边栏中，用户可以通过滑块设置多个关键参数，例如：
+
+vmin_level：用于设置差分图的最小阈值，这会影响颜色映射的对比度。
+max_features、max_shift、ransac_reproj_threshold：这些参数控制图像配准时（比如使用 SIFT 或 Correlation 方法）的特征提取和对齐过程。
+conv_kernel_size：设置卷积核的大小，用于对差分图进行平滑处理。
+b. 获取图像对（参考图、测试图和差分图）
+调用函数 get_image_pair_for_studio_input 来实现这一过程。其主要逻辑如下：
+
+确定图像目录
+根据传入的参数（如数据目录、Lot ID、Image ID 和图像类型“T”或“Rt”），构建图像所在的目录路径。
+
+加载图像
+
+调用 load_defect_pair：在指定目录下，根据缺陷编号加载相应的测试图和参考图。该函数会根据文件名后缀（例如直接编号、带 U、L 等后缀）判断哪张图片为测试图，哪张为参考图。
+判断是否存在多个参考图：如果有多个，则通常采用中位数图像作为参考，以减少噪声的影响。
+图像对齐与差分计算
+
+调用 get_diff_map：对齐参考图和测试图，计算出配准后的差分图。此函数会返回对齐后的参考图、测试图、差分图及一些元数据（例如最大、最小差分点的位置、平移量、RMSE 等）。
+图像后处理
+
+分别调用 apply_colormap 将参考图和测试图以灰度（gray）方式映射，同时对差分图使用“seismic”颜色映射（并根据 vmin_level 调整对比度）。
+对差分图再进行卷积滤波（调用 conv_kernel 生成卷积核，利用 OpenCV 的 cv2.filter2D 进行平滑），增强局部特征或消除噪声。
+转换为 Base64 编码
+
+最后，调用 numpy_to_base64 将处理后的图像（参考图、测试图以及经过卷积处理的差分图）转换为 Base64 字符串，方便在前端直接以 HTML 的 <img> 标签嵌入显示。
+函数返回的结果通常为一个列表（包含经过处理的图像的 Base64 字符串）和一个元数据字典（包含配准和平移等信息）。
+
+2. 任务构建
+任务构建的主要目标是将预处理好的图像数据以及自动生成的预标注信息整合到一个任务（task）数据结构中，供 Label Studio 组件调用展示和修改。
+
+a. 构造图像数据
+在前端中，会分别调用 get_image_pair_for_studio_input 处理两类图像（例如“T”和“Rt”），并将两部分的 Base64 字符串组合成一个列表。
+如：
+python
+複製
+images_base64 = [T_images[0], T_images[1], T_images[2],
+                 Rt_images[0], Rt_images[1], Rt_images[2]]
+这6个图像分别对应不同视图（例如：image1～image6），用于前端展示参考图、测试图和差分图。
+b. 生成任务字典（Task）
+调用 task_generator 函数，该函数负责构造传递给 Label Studio 的任务数据。其主要逻辑包括：
+
+定义数据结构
+构造一个字典 task，包含：
+
+data 字段：键为 image1 至 image6，对应的值为 Base64 编码的图像字符串，形如 "data:image/jpeg;base64,..."。
+completions 和 predictions：这些字段用来存储用户的标注结果和预标注信息。
+判断已有标注与生成预标注
+
+先通过 fetch_results 函数检查数据库中是否已有该图像的标注结果。如果存在，则将这些“existing_labels”传递给任务。
+如果没有，则调用 generate_prelabels 生成预标注：
+预标注方法可以是基于 YOLO 模型的目标检测（调用 YOLO_prelabel）或基于差分图的 minmax 策略（调用 minmax_prelabel）。
+预标注生成的结果（bounding boxes 及标签）将以 Label Studio 规定的格式保存，并放入 predictions 字段中。
+返回任务数据
+最终，task_generator 返回一个完整的任务字典，该字典既包含图像数据，也包含预标注或已有标注信息。
+
+c. 前端交互
+在 app.py 中，最终调用：
+python
+複製
+results_raw = st_labelstudio(config, interfaces, user, task_generator(...))
+将构造好的任务传递给 Label Studio 组件。用户在该界面上可以查看所有图像及预标注，并对标注结果进行修改，提交后会得到更新后的标注数据。
+总结
+图像预处理：
+
+根据选定的批次（Lot ID）和图像编号（Image ID），系统通过一系列函数完成图像加载、对齐、差分计算、颜色映射、卷积滤波等处理，并将结果转换成 Base64 格式，便于在网页上显示。
+任务构建：
+
+将预处理后的图像和自动生成的预标注（或已有标注）整合到一个任务字典中，格式符合 Label Studio 的要求。该任务数据包括6个视图（例如 image1 至 image6），使得用户能够在前端交互式地查看、修改和提交标注结果。
+整个流程使得原始图像经过预处理后自动生成初步缺陷标注，并以易于交互的形式呈现在前端，为后续人工确认和修改提供了便利。希望这个详细的解释能帮助你更好地理解这部分代码的逻辑和实现细节！
+
+
+
+图片在标注前需要经过预处理，主要原因有以下几点：
+
+突出缺陷特征
+预处理（如图像对齐、差分计算和颜色映射）可以将图像中的缺陷区域更加明显地突出出来。这样标注人员在查看时更容易发现异常区域，从而提高标注的准确性。
+
+降低噪音与干扰
+原始图像可能存在噪音、亮度不均或颜色偏差，经过预处理后可以统一图像的对比度、亮度等属性，减少干扰因素，使缺陷信息更清晰。
+
+统一图像格式
+通过预处理，所有图像都会按照相同的标准（如尺寸、色彩空间）处理后再进行标注，确保不同来源的图像在标注平台上显示一致，便于比较和分析。
+
+辅助自动预标注
+预处理后的图像更适合用自动检测算法（例如 YOLO）进行初步缺陷检测，从而生成预标注结果。标注人员只需要在此基础上进行微调，而无需从零开始标注，大大提高了工作效率。
+
+综上所述，图片预处理在标注过程中扮演了提升图像质量、突出关键信息和辅助自动预标注的重要角色，从而帮助标注人员更高效、准确地完成缺陷标注任务。
+
+
+
+下面逐行解释 task_generator 函数的代码逻辑，帮助你理解每一部分的作用：
+
+python
+複製
+def task_generator(images, crop_size, metadatas=None, method="minmax", model_path=None, label_type="rectangle", existing_labels=None):
+函数声明与参数：
+images：一个包含预处理后图像的列表，这里要求至少包含 6 张图像（通常是 image1~image6，分别对应参考图、测试图、差分图等）。
+crop_size：用于生成预标注时边界框的尺寸参数（例如，基于 min/max 位置生成的候选框大小）。
+metadatas：包含图像配准及差分图计算后生成的元数据信息（如平移、最大/最小差分点位置等），可能对预标注有辅助作用。
+method：预标注的方法选择，例如 "minmax"（基于最小最大差分点生成）或者 "YOLO"（基于深度学习检测）。
+model_path：当使用 YOLO 方法时，模型权重文件的路径。
+label_type：标注类型，默认是 "rectangle"（矩形标注）。
+existing_labels：若已存在标注数据，则传入已有标注信息，避免重新生成预标注。
+python
+複製
+    task = {
+        'completions': [],
+        'predictions': [],
+        'id': 1,
+        'data': {
+            'image1': f"data:image/jpeg;base64,{images[0]}",
+            'image2': f"data:image/jpeg;base64,{images[1]}",
+            'image3': f"data:image/jpeg;base64,{images[2]}",
+            'image4': f"data:image/jpeg;base64,{images[3]}",
+            'image5': f"data:image/jpeg;base64,{images[4]}",
+            'image6': f"data:image/jpeg;base64,{images[5]}"
+        }
+    }
+构造任务字典 task：
+'completions'：为空列表，通常用于存储用户最终的标注完成记录（这里暂未使用）。
+'predictions'：用于保存预标注信息（或已有标注），稍后会填入生成的标注结果。
+'id'：任务的标识符，设置为 1（在简单示例中可以固定）。
+'data'：关键部分，将图像数据组织成一个字典，键名为 image1 至 image6，每个值为经过 Base64 编码的 JPEG 图片字符串，并带上数据头（"data:image/jpeg;base64,"），方便前端直接显示。
+python
+複製
+    if existing_labels:
+        annotations = extract_annotations(existing_labels)
+        task['predictions'].append({
+            'model_version': 'existing_labels',
+            'result': annotations
+        })
+已有标注处理：
+如果函数参数 existing_labels 不为空，则说明数据库中已经有该图像的标注数据。
+调用 extract_annotations(existing_labels) 从已有数据中提取标注（例如每个区域的边界框、标签等）。
+将提取出的标注结果包装成一个字典，标识模型版本为 "existing_labels"，并追加到 task['predictions'] 中。
+python
+複製
+    else:
+        print("no labels found, generating prelabels...")
+        annotations = generate_prelabels(metadatas, crop_size, method=method, model_path=model_path, t_image=images[2], rt_image=images[5], label_type=label_type)
+        task['predictions'].append({
+            'model_version': 'prelabeling',
+            'result': annotations
+        })
+生成预标注：
+如果 existing_labels 为空，说明当前图像还没有标注数据，此时需要生成预标注结果。
+打印提示信息："no labels found, generating prelabels..."。
+调用 generate_prelabels 函数，传入：
+metadatas：图像配准后生成的元数据，可能包含差分图中最大/最小点等信息；
+crop_size：用于确定候选框大小；
+method：选择使用哪种预标注策略（例如 "minmax" 或 "YOLO"）；
+model_path：若方法为 YOLO，指定模型权重路径；
+t_image：传入 images[2]，通常作为差分图或者用于检测的图像；
+rt_image：传入 images[5]，另一类图像（比如右侧或另一角度的差分图）；
+label_type：标注的类型（例如矩形）。
+得到生成的预标注结果后，将它以字典形式存入 task['predictions']，并标记版本为 "prelabeling"。
+python
+複製
+    return task
+返回任务数据：
+最后，将构造好的任务字典 task 返回。该字典包含所有前端所需的数据和标注信息，供 Label Studio 组件加载显示。
+总结
+任务构建的核心目的是：将经过预处理后的图像和自动生成（或已有）的标注结果整合为一个符合 Label Studio 接口要求的数据结构。
+关键步骤：
+将 6 张图像（参考图、测试图、差分图等）转换为 Base64 字符串，并组织成任务数据的 data 部分。
+检查是否有现成的标注数据，若有则提取并直接使用；若无，则调用自动预标注函数生成预标注信息。
+将预标注结果封装到 predictions 字段中，并返回整个任务字典。
+这样设计使得前端组件既能显示预处理后的图像，也能加载或生成初始的标注结果，方便用户进行人工校正。
+
+
+
+
+1. 数据库存储的设计
+数据库表结构
+在代码中，使用 SQLite 数据库存储标注结果，表结构定义如下（在 app.py 中）：
+
+python
+複製
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS results_table (
+    id INTEGER PRIMARY KEY,
+    image_path TEXT,
+    results_json TEXT
+)
+''')
+conn.commit()
+conn.close()
+id：数据库自动生成的主键。
+image_path：用于唯一标识一张图片，一般由数据目录、Lot ID、Image ID 组合而成。
+results_json：存储标注结果的 JSON 字符串，这个 JSON 字符串包含了前端标注的详细内容（如标注区域、标签、坐标等）。
+2. 前端标注结果如何存储
+关键函数介绍
+2.1 fetch_results
+作用：在用户加载某张图片时，通过 image_path 从数据库中查找该图片是否已有标注记录。
+代码逻辑（简化版）：
+python
+複製
+def fetch_results(image_path, db_path):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (image_path,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return json.loads(result[0])
+    return None
+使用场景：在 app.py 中，加载当前图像之前，会先调用该函数，如果有记录，则将已有标注加载到 Label Studio 组件中，方便用户修改或查看已有结果。
+2.2 save_json_to_sqlite
+作用：当用户在前端标注页面提交标注结果后，将返回的 JSON 标注结果存入数据库中。
+代码逻辑（简化版）：
+python
+複製
+def save_json_to_sqlite(img_path, results_raw, db_path):
+    json_string = json.dumps(results_raw)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    # 检查该 image_path 是否已有记录
+    cursor.execute('SELECT results_json FROM results_table WHERE image_path = ?', (img_path,))
+    existing_entry = cursor.fetchone()
+    if existing_entry:
+        existing_json_string = existing_entry[0]
+        if existing_json_string == json_string:
+            print("Same img_path and same results_raw. No update needed.")
+        else:
+            cursor.execute('UPDATE results_table SET results_json = ? WHERE image_path = ?', (json_string, img_path))
+            print("Same img_path but different results_raw. Updated the entry.")
+    else:
+        cursor.execute('INSERT INTO results_table (image_path, results_json) VALUES (?, ?)', (img_path, json_string))
+        print("New img_path. Inserted a new entry.")
+    conn.commit()
+    conn.close()
+    print("Connection closed")
+使用场景：在前端标注提交后，app.py 会检查返回的 results_raw（标注结果），并调用该函数把标注结果与对应的 image_path 写入数据库。这样下次加载该图片时，就能通过 fetch_results 找到对应的标注数据。
+3. 前端如何使用这些后端代码
+在你的 app.py 中，整个流程大致如下：
+
+加载图像及初始化任务
+
+根据 Lot ID 与 Image ID 构造一个标识符（如 img_path），例如：
+python
+複製
+img_path = f"{data_dir}, {selected_lot_id}, {selected_image_id}"
+通过 fetch_results(img_path, db_path) 检查该图片是否已有标注记录。如果有，就直接加载已有标注；否则，使用预标注逻辑生成初始标注。
+构造任务并调用 Label Studio 组件
+
+调用 task_generator 构造任务数据，将图像数据和预标注或已有标注封装在任务字典中，然后调用：
+python
+複製
+results_raw = st_labelstudio(config, interfaces, user, task_generator(...))
+组件会展示图像及标注信息，用户可以对其进行修改。
+提交标注后保存到后端
+
+当用户点击“Submit”后，组件返回更新后的标注结果（JSON 格式）。在 app.py 中，代码会检测是否有变化（使用 has_results_raw_changed 函数）。
+如果有变化，则调用 save_json_to_sqlite(img_path, results_raw, db_path) 将最新的标注结果存入数据库中。
+页面刷新与数据更新
+
+保存成功后，程序更新 st.session_state.image_index，然后调用 st.rerun() 刷新页面，这样下一次加载时，就会根据当前的 image_path 使用 fetch_results 从数据库中加载最新标注记录。
+4. 总结
+后端数据库主要通过 image_path 来作为唯一标识，每个标注记录以 JSON 字符串的形式保存到 results_json 字段。
+当用户加载图片时，调用 fetch_results 检查是否有现成的标注，若有则加载到前端。
+当用户完成标注并提交后，调用 save_json_to_sqlite 将返回的标注结果存储或更新到数据库中。
+这套流程保证了前端标注结果能够持久化存储，方便后续查询、更新或导出数据用于训练模型。
+
+
+
+1. 初始化与设置
+页面配置与状态初始化
+页面设置
+在文件最开始调用了：
+
+python
+複製
+st.set_page_config(layout='wide')
+这将页面布局设置为宽屏模式，保证在显示多张图像（例如 6 张图像视图）时能够有足够空间。
+
+Session State 的初始化
+为了在页面刷新时保持一些状态信息（例如当前图像索引、批次索引以及上一次提交的标注结果），代码检查并初始化了以下变量：
+
+python
+複製
+if 'previous_results_raw' not in st.session_state:
+    st.session_state.previous_results_raw = None
+if 'image_index' not in st.session_state:
+    st.session_state.image_index = 0
+if 'lot_index' not in st.session_state:
+    st.session_state.lot_index = 0
+这些变量后续用于控制用户浏览图像、保持已有标注数据以及管理批次切换。
+
+2. 数据库初始化
+在前端启动时，代码会连接 SQLite 数据库并创建存储标注结果的表：
+
+python
+複製
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS results_table (
+    id INTEGER PRIMARY KEY,
+    image_path TEXT,
+    results_json TEXT
+)
+''')
+conn.commit()
+conn.close()
+结果表结构：
+image_path 用作唯一标识，每条记录对应一张图片。
+results_json 存储标注数据（JSON 格式），这部分数据会在标注提交后写入数据库中。
+3. 侧边栏选择与图像导航
+数据目录与批次（Lot ID）选择
+通过读取数据目录 data_dir 下的文件夹，筛选出所有批次（Lot ID），排除无关文件夹（如 log）。
+使用 st.sidebar.selectbox 展示批次列表，用户可以选择不同批次；同时代码利用 st.session_state.lot_index 来保持当前选中批次。
+图像索引与前进后退按钮
+图像编号列表
+调用函数 get_lrf_file 和 get_defect_list 得到当前批次中的缺陷文件及对应的图像编号列表（以及缺陷类型信息）。
+按钮操作
+在侧边栏中设置了“Previous Image”和“Next Image”按钮，点击后会更新 st.session_state.image_index。当到达当前批次的头或尾时，还会自动更新 lot_index（即切换批次），从而实现连续浏览整个数据集。
+图像编号选择
+利用 st.sidebar.selectbox 展示当前批次中的图像编号，允许用户直接选择某张图像进行标注。
+4. 图像预处理与任务数据构建
+获取处理后的图像数据
+调用 get_image_pair_for_studio_input
+这部分代码分别为两种图像类型（例如标记为 "T" 和 "Rt"）调用该函数，完成以下操作：
+
+加载图像对：通过 Lot ID、Image ID 定位到对应的图像文件夹，从中加载测试图和参考图。
+图像对齐与差分计算：调用内部的 load_defect_pair 和 get_diff_map 进行图像配准，计算两图差分（用来突出缺陷）。
+颜色映射与卷积滤波：对参考图、测试图使用灰度映射，对差分图使用“seismic”映射，再经过卷积滤波平滑处理。
+Base64 编码：将处理后的图像转换为 Base64 编码字符串，方便直接嵌入 HTML 显示。
+组合图像数据
+得到的图像数据被组合成一个列表 images_base64，通常包含 6 个视图（例如 image1~image6，对应不同角度或处理方式的图像）。
+
+构造任务数据（Task）
+调用 task_generator
+使用预处理后的图像和部分元数据（metadatas），调用 task_generator 构造任务字典：
+任务字典的 data 字段中存放图像数据（以 "data:image/jpeg;base64,..." 格式），供 Label Studio 组件加载。
+如果数据库中已存在标注（通过 fetch_results 判断），则将已有标注传入；否则，根据预设方法（例如 YOLO 或 minmax）生成预标注信息，并将其存入 predictions 字段。
+5. 前端标注交互与结果提交
+Label Studio 组件调用
+调用：
+python
+複製
+results_raw = st_labelstudio(config, interfaces, user, task_generator(...))
+这一步启动了 Label Studio 组件，展示任务数据（图像及标注）给用户。
+config：定义了前端界面布局（如两行显示图像、每个图像对应的标注工具）。
+interfaces 与 user：配置了用户界面中显示的工具和当前标注者信息。
+task_generator 返回的任务数据包含了图像和初始标注。
+用户标注与提交
+用户在前端交互界面中可以调整预标注的边界框或直接添加新的标注。
+当用户点击“Submit”后，Label Studio 组件会将标注结果（JSON 格式）返回给应用，并存储在变量 results_raw 中。
+标注结果处理与存储
+检测标注变化
+使用 has_results_raw_changed 函数比较当前提交的标注数据与上次提交的数据是否有变化，以避免重复保存。
+保存到数据库
+调用 save_json_to_sqlite(img_path, results_raw, db_path)，将当前 image_path 对应的标注结果写入数据库（如有重复则更新记录）。
+更新状态与刷新页面
+保存完成后，更新 st.session_state.image_index（自动切换到下一张图像），并调用 st.rerun() 刷新页面，使得下次加载时能显示最新的标注记录。
+6. 整体流程总结
+初始化：设置页面布局、初始化 Session State 与数据库表。
+侧边栏选择：用户通过侧边栏选择批次（Lot ID）和图像编号，同时通过前后按钮导航浏览图像。
+图像预处理：调用相关函数加载图像对，进行图像配准、差分计算、颜色映射及卷积滤波，最终转换成 Base64 格式。
+任务构建：将图像数据和预标注或已有标注整合到任务字典中，传递给 Label Studio 组件。
+用户标注：用户在交互界面中修改或确认标注，提交后返回标注结果。
+结果存储与更新：检测结果变化后，通过 save_json_to_sqlite 将标注结果存入 SQLite 数据库，同时更新 Session State 并刷新页面。
+这种设计使得前端和后端之间形成一个闭环：用户每次标注都会写入数据库，下次加载时直接从数据库读取已有标注，保证数据的一致性和持久化存储，同时支持用户在每次标注后自动切换到下一张图像进行连续作业。
+
+
+
+
+

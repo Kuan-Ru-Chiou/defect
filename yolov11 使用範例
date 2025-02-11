@@ -2584,7 +2584,221 @@ Click on Submit to save annotations to backend.
 
 
 
+# Toggle Label Studio
 
+## Overview
+This is a app that allows labeling data on the difference map and exporting them as json.
+
+## Quickstart
+### install dependencies
+Use **python 3.10.0** to reproduce.
+```bash
+cd toggle_labelstudio
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### run the script
+```bash
+streamlit run app.py
+```
+
+* Click on top-right settings. Disable completion panel (it has no functionality)
+* You can toggle around visualization paramters on the left.
+* Click on **Predictions** to see the rule-based predictions(using min/max diff on diff map).
+* Edit these predictions if necessary by clicking on the small icon next Predictions.
+* Only edit on **Diff Map** for now. Edits on the grayscale images won't be saved.
+* Click on **Submit** to save annotations to backend (will create a .db file for you locally under `toggle_labelstudio/`).  
+
+
+bugs:<br>
+* If you edit a label on the diffmap and save it, the changes on test and ref will only be displayed after you leave and return to the page (next page, then prev page).<br>
+
+* The update button is a button to edit an label **right after** submit. The button doesn't work right now. Use the trick in mentioned in 1. to edit existing labels.<br> 
+
+### Export data
+in `app.py`, you can see your .db file path.<br>
+```
+# modify the .db filename if you want a fresh start (will create file for you)
+db_path = "backend/db_files/this_bug_weird.db"
+# pass in trained model checkpoint (currently only supports YOLO)
+model_path = "/home/hubert007/Code/label_tool/labeling/runs/detect/megamind_nojit_vmin_fix/weights/best.pt"
+```
+Your just labeled data will be saved locally at `backend/db_files`
+
+go to `export/` and run 
+```
+python export_json_and_mask.py --db_path "your_db_path.db" --output_dir "desired_output_path"
+```
+
+### Train YOLO
+go read `prelabel/model_based/YOLO/README.md`
+
+The current best model is under `/home/hubert007/Code/label_tool/labeling/runs/detect/megamind_nojit_vmin_fix`.
+
+You can see all the metrics and checkpoints in the above folder.
+
+It's traing config is here : `/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/prelabel/model_based/YOLO/train_settings/megamind_nojit_vmin_fix.yaml` with 200 epochs.
+
+I currently have a more high-qulatiy labeled dataset of 225 images in `/home/hubert007/Code/label_tool/labeling/toggle_labelstudio/backend/db_files/the_regional_dataset.db`
+
+## Develop guide
+
+### `Frontend`
+
+#### `app.py`
+The frontend is written with **Streamlit**, and basically all packed in `app.py`. 
+
+Change .db path and YOLO's .ckpt path in `app.py` to point to your own .db file and YOLO's .ckpt file.
+
+##### `Labelstudio Component`
+The main labelstudio functionality comes from the repo [deneland/streamlit-labelstudio](https://github.com/deneland/streamlit-labelstudio). It creates a Streamlit component `st_labelstudio` that can be used to interact with Label Studio.
+
+The only usage of this is in `app.py` where we use it to create a label studio instance and pass it the data.
+
+This component takes in the following 4 parameters:
+* `config`: The UI configuration of our labeling task. The Rt, T display is defined there. The annotation type is also defined there.
+* `interfaces`: Which built-in interfaces to use for the labeling task.
+* `user`: Who's labeling? (I think this isn't very important, but it's required by Label Studio.)
+* `task`: **Important.** This is where we pass in the data that we want to label. In app.py we pass in a task_generator function. The diff-map logic is defined there. 
+
+The component returns a dictionary after **submit** is pushed. The format of that dictionary is crucial with **extracting labels**. Please print out this dictionary and understand what it contains.
+
+Currently, all code assumes the images are 256x256 pixels, if dynamic image size is needed, search for all 256 in the code base and replace it with variables.
+
+##### `frontend/`<br>
+Just contains some helper functions to convert data format.
+
+### `backend/`
+The current backend just stores the whole "annotation dictionary" mentioned above into sqlite3.
+The schema looks like this:
+```
+index                       image_path                                              results_json
+0    /mnt/fs0/dataset/Layer_M, F12_TMPD98_7M0A-R_20240503_170022, 1    {"id": "k8kst", "pk": null, "selecte...
+1    /mnt/fs0/dataset/Layer_M, F12_TMPD98_7M0A-R_20240503_170022, 2    {"id": "xmbtL", "pk": null, "selecte...
+2    /mnt/fs0/dataset/Layer_M, F12_TMPD98_7M0A-R_20240503_170022, 3    {"id": "ApHt7", "pk": null, "selecte...
+3    /mnt/fs0/dataset/Layer_M, F12_TMPD98_7M0A-R_20240503_170022, 4    {"id": "aI2sc", "pk": null, "selecte...
+```
+`image_path` isn't the exact absolute path, it is a string composing 3 elements:<br>
+1. dataset root directory
+2. lot id
+3. image id
+
+`results_json` is the dictionary mentioned in `frontend`. I just store the whole dictionary into a json string.
+
+You can run `backend/dbview.py` to print out a certain .db's contents.
+
+
+### `alignment/`
+The main functionalities of alignment is defined in `alignment/alignment.py`. The file itself is quite self-explanatory. <br>
+You can add your custom alignment methods as long as you return with the spec described in the comments.
+
+### `prelabel/`
+The main functionalities of prelabeling is defined in `prelabel/prelabel.py`, also self-explanatory. <br>
+You can easily add in other prelabeling methods by defining and swapping out the api.
+
+### `export/`
+Currently, it only contains one python file `mask_image.py`, whose <br>
+inputs:<br>
+1. .db file path
+2. output directory
+
+outputs:
+1. metadata.json
+2. cropped out mask of each defect
+
+#### Model training pipeline.
+go read `toggle_labelstudio/prelabel/model_based/YOLO/README.md`
+
+### TODO bug fix
+#### `app.py` 
+
+1. Sometimes when choosing new id, you have to click twice. I think this is related to the session_state : image_index.
+
+2. The **update** button is not working. I think if you go to the [streamlit_labelstudio/frontend/src/index.tsx](https://github.com/deneland/streamlit-labelstudio/blob/master/streamlit_labelstudio/frontend/src/index.tsx) you'll see the following code:
+```
+function onRender(event: Event): void {
+  const data = (event as CustomEvent<RenderData>).detail
+  
+  var ls = new LabelStudio('label-studio', {
+    config: data.args["config"],
+    interfaces: data.args["interfaces"][0],
+    user: data.args["user"][0],
+    task: data.args["task"],
+    
+    onLabelStudioLoad: function(ls) {
+      var c = ls.completionStore.addCompletion({
+        userGenerate: true
+      });
+      ls.completionStore.selectCompletion(c.id);
+    },
+    
+    onSubmitCompletion: function(ls, completion) {
+      console.log(ls)
+      completion = JSON.parse(JSON.stringify(completion));
+      Streamlit.setComponentValue(completion)
+    },
+    
+    
+  });
+  
+  // We tell Streamlit to update our frameHeight after each render event, in
+  // case it has changed. (This isn't strictly necessary for the example
+  // because our height stays fixed, but this is a low-cost function, so
+  // there's no harm in doing it redundantly.)
+  Streamlit.setFrameHeight()
+}
+```
+Maybe if we add in something like `onUpdateCompletion` to handle when a user updates their completion, we can activate the update button.
+
+3. The app currently cannot handle cases where both test and ref contain the same defect. That defect won't be shown on the diff map. 
+Here are some cases that cannot be handled.
+```
+            lot_id                           image_id 
+F12_TMPD98_7M0A-R_20240503_170022               75
+F12_TMPD98_7M0A-R_20240503_170022               76  
+F12_TMPD98_7M0A-R_20240503_170022               78  
+```
+
+4. Here are just some cases where I cannot find the defect.
+```
+F12_TMPD98_7M0A-R_20240503_170022               91
+F12_TMPD98_7M0A-R_20240503_170022               166
+F12_TMPD98_7M0A-R_20240503_170022               186
+F12_TMPD98_7M0A-R_20240503_170022               197
+F12_TMPD98_7M0A-R_20240503_170022               198
+F12_TMPD98_7M0A-R_20240503_170022               199
+
+Currently "the_regional_dataset.db" only labeled to id 224.
+
+```
+
+5. Some cases can't be aligned with either SIFT or Correlation.
+```
+F12_TMPD98_7M0A-R_20240503_170022               207
+F12_TMPD98_7M0A-R_20240503_170022               209
+F12_TMPD98_7M0A-R_20240503_170022               211
+F12_TMPD98_7M0A-R_20240503_170022               212
+F12_TMPD98_7M0A-R_20240503_170022               222
+F12_TMPD98_7M0A-R_20240503_170022               223
+```
+
+6. The current metadata only saves the image_path, bounding_boxes. However, we didn't save the toggle settings that were used during labeling. We need to add this information to the metadata so that we can reproduce the labeling states exactly.
+<br>
+<br>
+
+
+#### `toggle_labelstudio/prelabel/model_based/YOLO/dataset.py`
+1. The function `process_and_augment_images` seems to turn my red diffmaps into blue. It still trains well, but I think it's a bug in these lines:
+```
+    # Ensure the image is in RGB format
+    if image_array.shape[2] == 4:  # If the image has an alpha channel
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGRA2RGB)
+    else:
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+```
+I think the R and B channel are swapped. I'm not sure if this is a bug or just a misunderstanding of how OpenCV handles color channels.
 
 
 

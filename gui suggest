@@ -1,0 +1,513 @@
+下面给出一个例子，说明系统如何根据图像路径和缺陷编号来查找测试图和参考图，并画出目录结构示例。
+
+1. 示例目录结构
+假设数据存储在 /mnt/fs0/dataset/Layer_M 下，一个批次的目录结构如下：
+
+lua
+複製
+/mnt/fs0/dataset/Layer_M
+└── Lot123
+    └── Lot123
+         └── Images
+              └── InstantReviewT
+                   ├── 1234.png        <-- 测试图（Test Image）
+                   ├── 1234U.png       <-- 参考图：从上方（U）采集
+                   ├── 1234L.png       <-- 参考图：从下方（L）采集
+                   ├── 1234U_p.png     <-- 参考图：备用上方（U_p）
+                   └── 1234L_p.png     <-- 参考图：备用下方（L_p）
+在这个例子中，如果传入的缺陷编号是 1234，那么代码将会在目录
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/
+中查找所有匹配 1234* 的文件。
+
+2. 代码查找流程
+在函数 load_defect_pair 中，主要流程如下：
+
+使用 glob 模块搜索文件：
+
+python
+複製
+images = glob.glob(f'{img_path}/{str(defect_no)}*')
+如果 img_path 为 /mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT，defect_no 为 "1234"，
+那么搜索模式为 /mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234*，
+得到的结果可能为：
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234.png
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234U.png
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234L.png
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234U_p.png
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT/1234L_p.png
+判断测试图和参考图：
+
+代码检查：如果文件路径正好等于 "{img_path}/{defect_no}.png"，则该文件为测试图：
+python
+複製
+if image == f'{img_path}/{str(defect_no)}.png':
+    test = image
+否则，依据后缀将文件分别赋值给 ref_U, ref_L, ref_Up, ref_Lp：
+python
+複製
+elif image == f'{img_path}/{str(defect_no)}U.png':
+    ref_U = image
+# ...依次处理其他后缀...
+读取、灰度化与归一化：
+
+使用 cv2.imread 以灰度模式读取每个文件，并将像素值除以 255：
+python
+複製
+test = cv2.imread(test, cv2.IMREAD_GRAYSCALE) / 255
+同样读取参考图（如果存在），并将它们添加到一个列表 all_images 中。
+参考图的选择：
+
+如果 all_images 中图像数大于 3，则使用 np.median 计算中位数图像作为最终参考图：
+python
+複製
+if len(all_images) > 3:
+    reference = np.median(np.stack(all_images), axis=0)
+    is_median_ref = True
+否则，按照优先级选择已有的参考图（例如先选择 ref_U，若没有则依次选择 ref_L、ref_Lp、ref_Up）。
+返回结果：
+
+最终返回参考图、测试图及是否使用中位参考图的标记。
+
+3. 流程图示意
+下面是一个简化的流程图，展示从目录查找文件到返回测试图和参考图的过程：
+
+mermaid
+複製
+flowchart TD
+    A[开始：传入 img_path 和 defect_no]
+    B[使用 glob 搜索 "1234*" 的文件]
+    C[得到文件列表：1234.png, 1234U.png, 1234L.png, ...]
+    D[检查文件名是否等于 "1234.png"]
+    E[是 -> 将该文件设为测试图 (test)]
+    F[其他 -> 根据后缀分别赋值给 ref_U, ref_L, ref_Up, ref_Lp]
+    G[读取测试图和参考图（灰度化、归一化）]
+    H[将所有图像加入 all_images 列表]
+    I[判断 all_images 数量是否 > 3]
+    J[是 -> 使用 np.median 计算中位数参考图]
+    K[否 -> 按优先级选择已有参考图]
+    L[返回 reference, test, is_median_ref]
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    D --> F
+    E --> G
+    F --> G
+    G --> H
+    H --> I
+    I -- 是 --> J
+    I -- 否 --> K
+    J --> L
+    K --> L
+总结
+目录结构：
+图像文件存储在 InstantReviewT 文件夹中，文件名按照缺陷编号和后缀进行命名。
+
+文件查找：
+使用 glob 搜索所有以缺陷编号开头的文件，然后通过文件名判断哪张为测试图（正好是“1234.png”）以及哪些为参考图（例如“1234U.png”、“1234L.png”）。
+
+图像处理：
+对找到的文件进行读取、灰度化和归一化后，再根据数量选择单张参考图或计算中位数参考图，最终返回测试图与参考图供后续对齐和差分计算使用。
+
+这种设计要求检测或采集系统事先按照固定命名规则提供缺陷图像，代码再从中提取和处理，从而为后续的缺陷检测和标注打下基础。如果你还有其他问题或需要进一步解释，请继续提问！
+
+
+
+
+
+生成 metadata 字典的目的是为了记录在图像对齐和差分计算过程中获得的一系列关键指标，这些指标可以帮助我们在后续处理中自动定位缺陷、评估对齐质量以及生成预标注框。下面详细说明这些指标的含义、用途，以及如何在实际中利用它们：
+
+1. 主要指标及其含义
+translation（平移量）
+表示参考图与测试图在 X、Y 方向上的平移量。如果平移量很大，可能说明两幅图像存在较大位移，需要特别注意对齐质量。
+
+max_difference 与 min_difference
+分别是差分图中最大的正差和最小的负差。这两个值反映了图像之间最大和最小的像素差异，通常缺陷区域会在这两个值附近出现。
+
+abs_max_difference（最大绝对差）
+取上述两者中绝对值最大的一个，用来衡量整体差异的强度。如果该值较高，可能表示图像中存在明显的缺陷。
+
+rmse（均方根误差）
+表示参考图与测试图整体差异的统计指标。较低的 RMSE 意味着两幅图像总体上非常相似；反之，较高的 RMSE 则可能提示存在异常区域。
+
+max_pos 与 min_pos
+分别表示在差分图中差分值最大的像素位置和最小的像素位置，这两个位置往往对应缺陷最明显的区域。在实际应用中，我们可以利用这些坐标生成预标注框，将检测到的缺陷区域框选出来。
+
+is_median_ref（是否使用中位数参考图）
+表示在参考图的选择过程中，是否采用了多张参考图的中位数作为参考图。使用中位数可以降低单一图像噪声的影响，但同时也需要记录下来，以便后续对比或调试。
+
+2. 实际应用场景
+a. 自动生成预标注
+在自动预标注中，可以根据 max_pos 和 min_pos 来确定缺陷区域的边界。例如，可以以这两个坐标为中心，生成一个固定大小（由 crop_size 参数决定）的候选框供标注人员进一步确认。
+
+b. 对齐质量评估
+translation：如果平移量超过预期范围，可能需要重新进行对齐。
+rmse：整体误差较高时，也可能提示对齐存在问题。
+这些指标可以作为质量控制的参考，确保系统处理后的图像足够稳定再进入下一步。
+c. 缺陷定位与分析
+max_difference/min_difference：能够直接告诉我们图像中哪些区域出现了较大变化，这往往对应缺陷。
+abs_max_difference：用于判断缺陷的严重程度，值越高，说明缺陷越明显。
+d. 数据记录与后续分析
+将所有这些指标存储在 metadata 字典中，不仅可以在预标注阶段使用，还能用于后续的统计分析、模型训练数据的质量评估、以及对生产线检测系统的性能监控。
+
+3. 示例 metadata 字典
+假设经过对齐和差分计算，我们得到以下数据：
+
+json
+複製
+{
+  "lot_id": "Lot123",
+  "defect_no": 1234,
+  "translation": [5.0, -3.2],
+  "max_difference": 0.8,
+  "min_difference": -0.6,
+  "abs_max_difference": 0.8,
+  "rmse": 0.2,
+  "max_pos": [120, 130],
+  "min_pos": [50, 60],
+  "is_median_ref": true
+}
+在实际中，你可以利用这些数据来：
+
+自动绘制预标注框（比如在差分图上标出 (120,130) 处的候选缺陷区域）。
+判断对齐是否正常（比如如果 translation 数值过大，可能提示设备或图像采集环节存在问题）。
+对每批数据进行质量统计，为后续训练和系统改进提供依据。
+4. 总结
+生成 metadata 字典的主要作用是：
+
+记录关键指标：保存对齐及差分计算中的所有关键数据。
+辅助自动预标注：利用坐标和误差指标自动生成候选缺陷区域，减少人工标注工作量。
+质量控制与后续分析：通过统计平移、RMSE 等指标，评估对齐效果和图像质量，同时为后续模型训练提供量化数据。
+
+
+
+
+
+
+  這裡的ｌｏｔ＿ｉｄ　　跟前端的　ｌｏｔ＿＿ｉｄ　　一樣嗎　　從我給的所有代碼邏輯
+
+推理花了 幾秒
+从你提供的代码来看，前端和后端都使用相同的 lot_id 来唯一标识一个批次（Lot）。具体说明如下：
+
+在前端（如 app.py）中，lot_id 是从数据目录中筛选出来的文件夹名称，用来表示当前选择的批次，例如通过 selected_lot_id = st.sidebar.selectbox('Select Lot ID', lot_ids, index=st.session_state.lot_index) 得到。
+
+在后端处理和 metadata 构造时，lot_id 同样作为参数传入，比如在 get_diff_map 函数中，lot_id 被记录到 metadata 字典中，作为标识信息的一部分。
+
+因此，代码逻辑中无论是前端展示还是后端的对齐、差分计算和存储，lot_id 的概念是一致的，都是用来标识同一个数据批次。这确保了前后端在数据处理、标注和存储时能够对应到同一批次的数据。
+
+你說：
+程式碼的ｌｏｄ＿ｉｄ　是從資料夾名稱來的　　可否舉例　　或者從我的程式碼　哪些片段看出來的
+推理花了 5 秒
+从你提供的代码中，可以看到 lot_id 是直接从数据目录下的文件夹名称中提取出来的。下面举两个例子说明这一点：
+
+1. 从 app.py 中的代码示例
+在 app.py 中，有如下代码片段：
+
+python
+複製
+data_dir = "/mnt/fs0/dataset/Layer_M"  
+items = os.listdir(data_dir)
+lot_ids = [item for item in items if os.path.isdir(os.path.join(data_dir, item)) and item != 'log']
+lot_ids.sort()
+解释：
+
+os.listdir(data_dir) 会列出 /mnt/fs0/dataset/Layer_M 下的所有项。
+通过判断 os.path.isdir(os.path.join(data_dir, item)) 只保留目录项，这样得到的 lot_ids 列表中存放的就是各个批次的文件夹名称，也就是 lot_id。
+例如，如果目录中有文件夹 Lot123、Lot456，那么 lot_ids 就会包含 ["Lot123", "Lot456"]。
+2. 从 get_lrf_file 函数中的代码示例
+函数定义如下：
+
+python
+複製
+def get_lrf_file(data_dir, selected_lot_id):
+    if os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_Classified.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_Classified.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_classified.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_classified.lrf")
+    elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}.lrf")):
+        lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}.lrf")
+    else:
+        lrf_file = None
+
+    return lrf_file
+解释：
+
+此函数的第二个参数 selected_lot_id 来自前端通过 lot_ids 选择的文件夹名称。
+拼接文件路径时使用了 os.path.join(data_dir, selected_lot_id, ...)，这说明在该目录结构中，每个批次都是一个以 lot_id 命名的文件夹。
+根据不同的命名规则（如 “Lot123_ADD.lrf”、“Lot123_Classified.lrf”等），函数会查找对应的 .lrf 文件。
+总结
+前端部分： 通过读取数据目录下的文件夹名称生成 lot_ids，用户在侧边栏选择的就是这些文件夹名称，这就是 lot_id。
+后端部分： 无论是查找 .lrf 文件还是生成 metadata，代码都是以 selected_lot_id 来构建文件路径和标识批次数据。
+因此，整个系统中 lot_id 的来源就是数据目录下的文件夹名称，从这两个代码片段中可以清晰地看出这一点。
+
+你說：
+可否把這種模式整理出數據目錄結構　　方便了解程式碼設計資料目錄流程
+推理花了 4 秒
+下面给出一个典型的数据目录结构示例，并说明各级目录在代码中的作用，帮助你理解系统如何通过目录结构组织数据：
+
+数据目录结构示例
+假设数据存放在 /mnt/fs0/dataset/Layer_M 下，目录结构大致如下：
+
+lua
+複製
+/mnt/fs0/dataset/Layer_M
+├── Lot123                   <-- 批次文件夹（lot_id）
+│   └── Lot123               <-- 子文件夹，名称与批次相同（用于存放更详细的数据）
+│       ├── Lot123_ADD.lrf   <-- 该批次的缺陷文件（.lrf），可能有多种命名方式
+│       ├── Lot123.lrf
+│       └── Images         <-- 图像数据文件夹
+│           ├── InstantReviewT   <-- 存放“测试图”（T）及相关参考图，文件命名如：1234.png、1234U.png等
+│           │   ├── 1234.png        <-- 测试图：文件名正好是“缺陷编号.png”
+│           │   ├── 1234U.png       <-- 参考图：带有后缀 U（例如上方图）
+│           │   ├── 1234L.png       <-- 参考图：带有后缀 L（例如下方图）
+│           │   ├── 1234U_p.png     <-- 备用参考图：U_p
+│           │   └── 1234L_p.png     <-- 备用参考图：L_p
+│           └── InstantReviewRt  <-- 存放另一组图像（RT），可能代表另一视角或经过不同处理后的图像
+│               ├── 1234.png
+│               ├── 1234U.png
+│               ├── 1234L.png
+│               ├── 1234U_p.png
+│               └── 1234L_p.png
+├── Lot456                   <-- 另一个批次
+│   └── Lot456
+│       └── Images
+│           ├── InstantReviewT
+│           │   └── ...          <-- 类似命名规则
+│           └── InstantReviewRt
+│               └── ...
+└── log                      <-- 排除的目录（日志）
+各级目录说明
+/mnt/fs0/dataset/Layer_M
+这是数据集的根目录，存放所有批次（Lot）的数据。
+
+Lot123、Lot456 等（批次文件夹）
+这些文件夹的名称即为 lot_id。在 app.py 中，通过 os.listdir(data_dir) 筛选出所有目录，从而获得所有批次的 ID。
+
+Lot123 内部的子文件夹（同名文件夹）
+在每个批次文件夹内部，再有一个以相同名称命名的子文件夹，此处存放该批次的详细数据，包括 .lrf 文件和图像数据。
+如 Lot123/Lot123/Lot123_ADD.lrf 或 Lot123/Lot123/Lot123.lrf 都会被 get_lrf_file 函数使用。
+
+Images 目录
+存放与当前批次相关的所有图像数据。代码通过构建路径 data_dir/selected_lot_id/selected_lot_id/Images 来定位图像数据所在的位置。
+
+InstantReviewT 与 InstantReviewRt 目录
+这两个目录分别存放不同类型的图像数据：
+
+InstantReviewT：存放测试图（Test Image）及其参考图。文件名如 1234.png 表示测试图，而 1234U.png、1234L.png 等表示参考图。
+InstantReviewRt：存放另一组图像数据（RT），可能用于对比或不同角度的显示，命名规则类似。
+代码如何利用这种目录结构
+前端选择 Lot ID
+在 app.py 中，代码使用 os.listdir(data_dir) 和过滤条件来提取所有批次文件夹（lot_id）。例如：
+
+python
+複製
+items = os.listdir(data_dir)
+lot_ids = [item for item in items if os.path.isdir(os.path.join(data_dir, item)) and item != 'log']
+这样用户在侧边栏选择的批次名称就是目录名称，例如 "Lot123"。
+
+获取缺陷文件
+函数 get_lrf_file(data_dir, selected_lot_id) 会基于 lot_id 构造路径，如：
+
+python
+複製
+os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")
+这说明 .lrf 文件也存放在以 lot_id 命名的文件夹中。
+
+加载图像
+在 get_image_pair_for_studio_input 函数中，图像路径构造为：
+
+python
+複製
+img_dir = f"{data_dir}/{selected_lot_id}/{selected_lot_id}/Images/InstantReview{selected_image_type}"
+根据传入的 selected_image_type（如 "T" 或 "Rt"），确定从 InstantReviewT 或 InstantReviewRt 目录加载图像。
+
+总结
+通过上述目录结构示例和说明，可以清晰地看到整个系统如何利用文件夹名称（lot_id）来组织数据。前端通过读取 /mnt/fs0/dataset/Layer_M 下的所有文件夹，获得批次（Lot ID）；每个批次内部又有专门的文件夹存放 .lrf 文件和图像数据，而图像数据又根据类型分成 InstantReviewT 和 InstantReviewRt。这样设计不仅方便代码定位文件，也保证了前后端在数据处理时的一致性。
+
+
+
+
+1. 数据目录根路径（data_dir）与批次目录（lot_id）
+路径构造
+data_dir：在代码中通常定义为
+
+python
+複製
+data_dir = "/mnt/fs0/dataset/Layer_M"
+这是所有数据文件存放的根目录。
+
+批次（Lot ID）：
+在 app.py 中，通过读取 data_dir 下的所有目录来获取批次：
+
+python
+複製
+items = os.listdir(data_dir)
+lot_ids = [item for item in items if os.path.isdir(os.path.join(data_dir, item)) and item != 'log']
+这里每个文件夹名称即为一个 lot_id，例如 "Lot123"、"Lot456" 等。
+
+设计思路
+将每个批次的数据单独存放在一个以 lot_id 命名的文件夹中，便于区分不同批次，并且在后续数据处理、标注和模型训练时，能够依据 lot_id 快速定位数据来源。
+
+2. 缺陷文件（.lrf）路径
+路径构造
+在函数 get_lrf_file(data_dir, selected_lot_id) 中，代码根据传入的 lot_id 生成不同命名规则的 .lrf 文件路径：
+
+python
+複製
+if os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")):
+    lrf_file = os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_ADD.lrf")
+elif os.path.exists(os.path.join(data_dir, selected_lot_id, f"{selected_lot_id}_Classified.lrf")):
+    ...
+这里构造的路径示例为：
+
+swift
+複製
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123_ADD.lrf
+设计思路
+采用统一的命名规则（例如 lot_id 后接不同后缀）来存放缺陷描述文件，使得后续代码能通过简单的字符串拼接查找对应文件，而不用硬编码每种情况。
+
+3. 图像路径
+路径构造
+图像数据存放在每个批次文件夹内部的 Images 子目录中。函数 get_image_pair_for_studio_input 用于构造图像目录：
+
+python
+複製
+img_dir = f"{data_dir}/{selected_lot_id}/{selected_lot_id}/Images/InstantReview{selected_image_type}"
+例如，当 selected_lot_id 为 "Lot123" 且 selected_image_type 为 "T" 时，图像路径为：
+
+swift
+複製
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewT
+同理，如果 selected_image_type 为 "Rt"，则路径为：
+
+swift
+複製
+/mnt/fs0/dataset/Layer_M/Lot123/Lot123/Images/InstantReviewRt
+设计思路
+利用批次文件夹和子文件夹结构来组织不同类型的图像数据。InstantReviewT 与 InstantReviewRt 分别存放不同视角或处理方式的图像，从而方便前端展示和后续对齐、差分计算。
+
+4. 图像文件查找与加载
+路径使用
+在函数 load_defect_pair(img_path, defect_no) 中，使用 glob 模块根据缺陷编号查找匹配的文件：
+
+python
+複製
+images = glob.glob(f'{img_path}/{str(defect_no)}*')
+例如，若 defect_no 为 "1234"，则在指定 img_path 下查找所有以 "1234" 开头的文件，可能包括：
+
+1234.png（测试图）
+1234U.png、1234L.png、1234U_p.png、1234L_p.png（参考图）
+随后，代码依据文件名判断：
+
+python
+複製
+if image == f'{img_path}/{str(defect_no)}.png':
+    test = image
+elif image == f'{img_path}/{str(defect_no)}U.png':
+    ref_U = image
+...
+设计思路
+通过统一的文件命名规则（缺陷编号加后缀）实现自动分类，方便后续自动读取并进行灰度化、归一化以及图像对齐等处理。
+
+5. 数据集构建输出路径
+路径构造
+在构建数据集时，代码会生成训练、验证、测试集的目录：
+
+python
+複製
+train_images_dir = os.path.join(dataset_dir, 'train/images')
+train_labels_dir = os.path.join(dataset_dir, 'train/labels')
+val_images_dir = os.path.join(dataset_dir, 'val/images')
+val_labels_dir = os.path.join(dataset_dir, 'val/labels')
+test_images_dir = os.path.join(dataset_dir, 'test/images')
+test_labels_dir = os.path.join(dataset_dir, 'test/labels')
+这里 dataset_dir 是输出数据集的根目录，程序会自动创建这些子目录用于存放处理后的图像和对应标注文件。
+
+设计思路
+将数据集划分为训练、验证和测试集的目录结构，使得后续模型训练时能方便读取图像和标签。目录结构清晰，便于管理数据增强后的图片及其标注信息。
+
+6. 数据库文件路径
+路径使用
+后端数据库路径通常在 app.py 或相关模块中指定，例如：
+
+python
+複製
+db_path = "backend/db_files/the_regional_dataset.db"
+或其他指定路径。数据库中存放标注结果，文件路径作为 image_path 的一部分存入数据库中。
+
+设计思路
+使用固定的数据库文件路径存储所有标注结果，使得系统在加载标注时能够通过相同的 image_path（由数据目录、lot_id、image_id 组合）查找对应记录，保证数据一致性。
+
+总结设计思路
+层级目录结构清晰：
+数据根目录（data_dir）下按批次（lot_id）分文件夹，每个批次内部包含 .lrf 文件和 Images 子目录，Images 子目录下再根据图像类型分为 InstantReviewT 和 InstantReviewRt 等。这种设计使得数据来源、批次信息和图像类型一目了然。
+
+统一命名规则：
+
+缺陷文件：采用 lot_id_XXX.lrf 命名方式，方便程序查找。
+图像文件：根据缺陷编号加后缀（如 “1234.png”、“1234U.png”）来自动区分测试图与参考图。
+路径构造与数据读取：
+代码通过字符串拼接和 os.path.join 构造出各个数据文件的绝对路径，再通过 glob、cv2.imread 等函数读取数据，保证数据读取过程的灵活性与扩展性。
+
+数据写入输出路径：
+构建数据集时，按照 train/val/test 分类存储图像与标签，同时数据库文件路径固定，确保前后端数据交换的统一标准。
+
+通过这种整体设计，整个系统能够轻松定位数据、读取文件、处理图像以及存取标注结果，保证前后端、数据集构建与数据库管理之间的一致性和可维护性
+
+
+
+
+
+下面解释一下 app.py 中前端用户交互、标注后更新页面的主要逻辑，以及为什么代码能够正确刷新页面：
+
+状态管理与页面刷新
+
+Session State 的使用：
+程序在开始时检查并初始化了几个 session_state 变量（如 previous_results_raw、image_index、lot_index）。这保证了在多次刷新或重新运行时（Streamlit 的运行机制是“每次用户操作都会重新运行整个脚本”），当前的图像索引和批次（lot）状态能被保存和正确恢复。
+
+检测标注变化：
+当用户在 Label Studio 组件中完成标注后，组件会返回一个 JSON 格式的结果（results_raw）。函数 has_results_raw_changed(results_raw) 会对比当前结果和之前存储在 session_state 中的结果，以判断是否有更新。
+
+保存标注和更新索引：
+如果检测到新的标注（即结果发生变化），代码会先调用 sync_labels_across_3images(results_raw) 来同步不同视图（例如 image1、image2 与 image3）的标注；接着利用 save_json_to_sqlite 将新的标注结果存入 SQLite 数据库；最后更新 st.session_state.image_index（以及在达到当前批次结尾时更新 lot_index）来决定下一次显示哪张图。
+
+刷新页面：
+最后调用 st.rerun()（在 Streamlit 中，这个调用会重新执行整个脚本）以刷新页面。这样就可以加载新的 session_state 状态，并显示更新后的图像及预标注结果。
+
+根据 Streamlit 的文档，利用 rerun 机制可以让应用根据更新后的状态重新构建界面，从而达到页面刷新的效果 。
+
+前端工具与组件集成
+
+streamlit_labelstudio 组件：
+代码中使用的 st_labelstudio 是一个 Streamlit 组件，它集成了 Label Studio 的前端标注界面（该组件最初由 deneland/streamlit-labelstudio 提供）。
+
+这个组件接收任务数据（由 task_generator 构造），任务数据包含了六个图像视图（例如经过预处理的参考图、测试图、差分图等）和初步预标注信息。
+
+当用户在该组件中修改或确认标注后，组件返回标注结果。这样一来，前端界面既利用 Label Studio 的标注功能，也能通过 Streamlit 的 session_state 和 rerun 机制实现无缝的页面刷新。
+
+任务数据构建：
+task_generator 函数负责构造任务数据字典，其中将每个图像的 Base64 编码字符串放入 data 字段，并将预标注或已有标注结果放入 predictions 字段。
+
+当页面加载时，如果数据库中已存在标注，则直接加载已有标注；否则调用预标注方法生成候选标注。这样既保证了数据的一致性，也方便用户进行人工校正。
+
+为何能正确刷新页面
+
+通过更新 session_state（如 image_index 和 lot_index）后，再调用 st.rerun()，整个脚本会从头运行，此时根据最新的 session_state，当前选定的批次和图像会发生改变，进而加载新的图像和标注数据。
+这种“无状态（stateless）”的重新执行机制正是 Streamlit 的核心工作方式，通过使用 session_state 保持数据，再用 rerun 刷新页面，就可以实现用户操作后页面的即时更新。
+总结
+整体来看，app.py 的逻辑是先通过侧边栏让用户选择批次和图像，再利用一系列图像处理函数获得展示图像。用户在 Label Studio 组件中标注后，程序检测到标注数据的变化，就会更新数据库和 session_state，并通过调用 st.rerun() 重新运行整个脚本，从而刷新页面显示下一张图或更新后的标注结果。这种机制利用了 Streamlit 的重新运行模式和 session_state 的持久化能力，确保了前端用户交互和页面刷新能够无缝衔接。
+
+
+
+
+      
+
+      
+
+
+
+
+

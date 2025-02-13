@@ -1,0 +1,181 @@
+下面这段代码摘自数据集构建部分（函数 create_dataset 中的 process_data 部分），展示了如何对同一张图像进行数据增强，也就是说，会生成多张经过不同增强变换的图片，并且每个图片都会保存对应的 label（bounding box）文件：
+
+python
+複製
+# Start augmentation for diff map images
+num_of_augments = np.random.randint(1, max_augment_factor)
+
+for i in range(1, num_of_augments + 1):
+    # 随机设置 vmin_level 参数，范围 [-1.70, -0.30]
+    vmin_level = torch.FloatTensor(1).uniform_(-1.70, -0.30).item()
+    diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+
+    # 随机选择卷积核尺寸
+    conv_kernel_size = torch.randint(1, 4, (1,)).item()
+    conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+
+    # 应用 albumentations 的数据增强（旋转、翻转、仿射变换等）
+    try:
+        aug_image, aug_bboxes, aug_labels = process_and_augment_images(
+            conv_diff_image, bounding_boxes, aug_params, image_path
+        )
+    except:
+        continue
+
+    # 定义保存路径
+    png_path = os.path.join(images_dir, f"{image_type}_{image_id}_diff_{str(i)}.png")
+    label_path = os.path.join(labels_dir, f"{image_type}_{image_id}_diff_{str(i)}.txt")
+
+    # 将增强后的图像（张量形式）转换为 NumPy 数组，再转换为 PIL Image 保存为 PNG
+    np_image = aug_image.permute(1, 2, 0).cpu().numpy()
+    pil_image = Image.fromarray(np_image)
+    pil_image.save(png_path)
+
+    # 保存增强后的 bounding box 标签
+    if len(aug_bboxes) == 0:
+        if use_background == False:
+            continue
+        with open(label_path, 'w') as f:
+            f.write("")
+    else:
+        for bbox, label in zip(aug_bboxes, aug_labels):
+            with open(label_path, 'a') as f:
+                f.write(f"{label} {bbox[0]} {bbox[1]} {bbox[2]} {bbox[3]}\n")
+说明：
+
+这段代码中，首先根据随机数决定对当前图像生成多少个增强版本（num_of_augments）。
+对每个增强版本，代码会随机设置一些参数（例如 vmin_level、卷积核尺寸等），并调用 process_and_augment_images 对图像和相应的 bounding box 同时做数据增强。
+最后，增强后的图像保存为 PNG 文件，同时对应的增强后 bounding box 信息保存为文本文件（YOLO 格式），以便后续用于模型训练。
+因此，对于同一个原始图像，会生成多个增强版本，每个版本都有自己的图像文件和 label 文件。
+
+
+
+1. 数据来源与标注结果的存储
+前端标注：
+前端使用 Streamlit 结合 Label Studio 组件展示图像并生成标注。用户对图像中的缺陷进行矩形标注，生成一个 JSON 格式的标注结果。
+这些标注结果中，每个缺陷区域通常包含如下信息：
+
+x, y: 缺陷区域左上角的坐标（以像素为单位）。
+width, height: 缺陷区域的宽度和高度。
+label: 缺陷的类别，例如 "Defect_left" 或 "Defect_right"（代码中将这两种都映射为类别 0）。
+数据库存储：
+标注结果以 JSON 字符串的形式存储在 SQLite 数据库的 results_table 表中，数据库的记录通过一个唯一标识符 image_path（由数据目录、Lot ID 以及 Image ID 组成）来区分不同的图像。
+
+2. 从数据库提取标注信息生成元数据
+db_to_metadata 函数：
+这个函数从 SQLite 数据库中读取每条记录（每条记录对应一张图像及其标注 JSON），将其转换为一个元数据字典。
+每个元数据字典中主要包含：
+
+image_path：实际图像文件的路径（如：.../Images/InstantReviewT/1411L.png）。
+bounding_box：一个列表，每个元素为一个字典，里面有 "x", "y", "width", "height", "label" 等字段。
+这个 JSON 文件就成为了后续构建 YOLO 数据集的基础数据。
+
+3. 构建 YOLO 数据集
+3.1 数据集目录的划分
+create_dataset 函数：
+该函数先根据提取的元数据，将数据按比例划分为训练集、验证集和测试集，并在指定的 dataset_dir 下建立相应的文件夹结构：
+train/images 与 train/labels
+val/images 与 val/labels
+test/images 与 test/labels
+3.2 图像处理及数据增强
+如果设置使用 diff map（即 diff_map=True），代码会对每张图像调用一系列处理函数（例如：
+
+load_defect_pair：根据缺陷编号从对应文件夹加载测试图和参考图。
+get_diff_map：对参考图和测试图进行对齐、计算差分图（diff map）以及提取配准元数据（如最大/最小差异点位置）。
+apply_colormap：将图像和 diff map 分别映射为灰度或彩色（例如使用 'gray' 或 'seismic' 颜色映射）。
+conv_kernel 与 cv2.filter2D：对 diff map 进行卷积滤波，平滑处理。
+同时，代码利用 albumentations 库在函数 process_and_augment_images 中对图像和 bounding box 同步进行随机旋转、翻转、仿射变换等数据增强操作。
+数据增强不仅扩充了训练数据，还保证了 bbox 经过变换后能够与图像保持一致。
+
+3.3 Bounding Box 的提取与转换
+标注数据的来源：
+从之前生成的 JSON 元数据中，每个图像的 bounding_box 列表中已经包含了缺陷的标注信息。
+每个 bbox 原始数据通常包含：
+
+x: 左上角横坐标（像素）
+y: 左上角纵坐标（像素）
+width: 宽度（像素）
+height: 高度（像素）
+label: 类别标签（例如 "Defect_left"、"Defect_right"）
+YOLO 格式要求：
+YOLO 训练时要求的标注格式为：
+
+php-template
+複製
+<class_id> <x_center> <y_center> <width> <height>
+其中坐标和尺寸都是归一化后的数值（即除以图像的宽和高），并且 x_center 和 y_center 表示边界框中心的位置。
+
+转换过程：
+在函数 process_and_augment_images 中，对每个 bbox 的数据做如下转换：
+
+计算中心坐标：
+x_center = (bbox['x'] + bbox['width'] / 2) / image_width
+y_center = (bbox['y'] + bbox['height'] / 2) / image_height
+计算归一化的宽高：
+width_norm = bbox['width'] / image_width
+height_norm = bbox['height'] / image_height
+对于类别，代码中将 "Defect_left" 和 "Defect_right" 均映射为类别 0（即 YOLO 训练中的类别编号为 0）。
+保存为文本文件：
+在处理过程中，代码为每张图像生成对应的 label 文件（扩展名为 .txt），每个文件中每行内容形如：
+
+複製
+0 x_center y_center width_norm height_norm
+这正是 YOLO 所需要的标注格式。
+
+4. 数据集构建流程总结
+提取标注信息：
+从 SQLite 数据库中提取标注 JSON，并转换成包含图像路径与 bounding box 数据的元数据 JSON 文件（通过 db_to_metadata 函数）。
+
+数据集划分：
+利用 train_test_split 将所有数据划分为训练集、验证集和测试集，并在指定目录中创建相应的 images 与 labels 文件夹。
+
+图像处理与数据增强：
+针对每个数据项，如果使用 diff map，会先调用图像配准和差分计算函数生成处理后的图像；同时，调用 process_and_augment_images 对图像和 bbox 同步进行数据增强。
+
+Bounding Box 转换：
+对每个 bbox，将原始像素坐标转换为 YOLO 格式（中心坐标及归一化宽高），写入对应的文本文件中。
+
+输出数据：
+处理后的图像保存为 PNG 文件，标注信息保存为对应的文本文件，整个数据集便于之后直接用 YOLO 进行训练。
+
+5. Bounding Box 抓取细节
+提取阶段：
+标注时用户在前端使用矩形工具框选缺陷区域，这些数据以 JSON 格式保存，在数据库中记录在 results_json 字段下的 "areas" 里。
+函数 db_to_metadata 会遍历这些 "areas"，根据每个区域中 x, y, width, height 的数据构造出 bounding_box 列表。
+
+转换阶段：
+在 process_and_augment_images 中，遍历传入的 bounding_boxes（列表中的每个元素为字典），并做如下处理：
+
+python
+複製
+for bbox in bounding_boxes:
+    x_center = (bbox['x'] + bbox['width']/2) / image_array.shape[1]
+    y_center = (bbox['y'] + bbox['height']/2) / image_array.shape[0]
+    width_norm = bbox['width'] / image_array.shape[1]
+    height_norm = bbox['height'] / image_array.shape[0]
+这些计算确保了 bbox 的坐标转换成了 [0,1] 范围内的相对值。
+
+类别映射：
+根据 bbox 中的 label 字段，如果为 "Defect_left" 或 "Defect_right"，则类别统一为 0；如果标注为其他（例如 "4D"），则代码可能会跳过该标注（视具体需求而定）。
+
+写入文件：
+每个 bbox 最终被写入对应的 label 文件中，格式为：
+
+複製
+0 x_center y_center width_norm height_norm
+多个 bbox 则每行一条，满足 YOLO 的训练要求。
+
+总结
+整套流程从前端人工标注开始：
+
+用户在前端（通过 Label Studio 组件）对图像中缺陷进行标注，得到包含 bbox 信息的 JSON 数据。
+这些标注数据存入 SQLite 数据库，并通过 db_to_metadata 转换成元数据文件，其中包含每张图像的 bounding_box 列表。
+在构建 YOLO 训练数据时，create_dataset 函数根据元数据将数据集划分为训练/验证/测试集，并调用数据增强函数对图像和 bbox 进行处理。
+在处理过程中，每个 bbox 的原始像素坐标（x, y, width, height）会被转换成 YOLO 所需的归一化格式（中心坐标、宽度、高度），并保存为文本文件。
+最终，图像和对应的 label 文件一起构成了可以直接用于 YOLO 模型训练的数据集。
+这样，通过系统化的流程，代码实现了从前端标注到生成 YOLO 训练数据的完整闭环，而 bounding box 的提取和转换则是其中的关键环节。
+
+
+
+
+

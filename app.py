@@ -284,3 +284,46 @@ st.session_state.update_pressed = False
 简单来说，提交事件是由 st_labelstudio 组件内部触发的，返回的结果被存储在 results_raw 中，而代码通过这个返回值来决定后续的保存和页面刷新操作。
 
 
+详细说明
+初始化阶段
+
+A：启动 App 时，通过 st.set_page_config 和 session_state 初始化（包括 previous_results_raw、image_index、lot_index 和新增的 update_pressed）。
+B：初始化数据库，确保 results_table 存在。
+数据与批次选择
+
+C：读取数据目录，获取所有批次（Lot IDs）。
+D：在侧边栏选择当前 Lot ID 和 Image ID。
+E：调用 get_lrf_file 和 get_defect_list 获取当前批次中的缺陷文件和图片编号列表。
+F：侧边栏中还有“Previous Image”、“Next Image”和新增的“Update”按钮，这些按钮会更新 session_state 中的索引或标志。
+图像预处理与任务构造
+
+G：调用 get_image_pair_for_studio_input 分别处理 T 和 Rt 图像，获得经过处理的图片数据和元数据。
+H：将处理后的图片（Base64 编码）和元数据组合后，调用 task_generator 构造任务数据，其中 data 部分与 config 中的变量（如 $image1、$image2 等）对应；predictions 部分包含预标注数据（自动生成或已有标注）。
+调用 Label Studio 组件
+
+I：将 config、interfaces、user 及任务数据传递给 st_labelstudio 组件，在前端显示标注界面。
+用户交互与提交
+
+J：用户在前端对图像进行标注，然后点击 “Submit” 按钮。
+K：组件返回标注结果 results_raw。
+提交结果处理
+
+L：检查 results_raw 是否不为空且与上次提交不同（通过 has_results_raw_changed 判断）。
+如果满足条件，则：
+M：调用 sync_labels_across_3images 同步不同图片视图之间的标注信息。
+N：调用 save_json_to_sqlite 将最新标注保存到数据库。
+判断 Update 按钮状态
+
+O：判断 st.session_state.update_pressed 是否为 True。如果用户点击了 Update 按钮，则 update_pressed 为 True，表示用户希望继续编辑当前图片，不自动切换；否则自动切换到下一张图片。
+P：如果 update_pressed 为 False，则自动将 image_index 自增，并在必要时更新 lot_index 和重新获取 defect_images_id_list。
+Q：重置 update_pressed 为 False（无论哪种情况，都重置标志）。
+R：最后调用 st.rerun() 刷新页面，加载新的任务数据或更新后的标注结果。
+这种流程确保：
+
+用户提交标注后，若未点击 Update 按钮，系统自动跳转到下一张图片。
+若用户点击 Update，则保持当前图片供进一步编辑。
+页面刷新后，最新的标注数据已保存到数据库并显示在界面上。
+这样就形成了前后端与用户之间的完整交互流程。
+
+
+

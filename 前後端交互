@@ -1,0 +1,134 @@
+1. 整体架构概述
+这个系统主要由三个部分构成：
+
+前端（用户界面）
+由 Streamlit 和 Label Studio 组件构成，负责展示图片、候选标注（预标注）和用户交互，用户可以在界面上查看图片、修改自动生成的候选框，并提交最终标注。
+
+后端（数据处理和任务构造）
+后端通过一系列函数（如读取缺陷文件、图像处理、自动预标注、任务构造等）来准备待标注的图片数据和预标注信息，然后构造任务（task），供前端加载。
+关键函数包括：
+
+读取和解析缺陷文件：get_lrf_file()、read_lrf_file()、detect_defect_list()、extract_no_and_classtype()、get_defect_list()
+图像处理与预处理：load_defect_pair()、get_diff_map()、numpy_to_base64()、apply_colormap()、conv_kernel()、get_image_pair_for_studio_input()
+自动预标注：YOLO_prelabel()、generate_prelabels()
+任务构造：task_generator()
+数据库操作：save_json_to_sqlite()、fetch_results()
+用户
+用户通过浏览器访问前端页面，加载任务后查看图片和自动生成的候选标注，进行修改、确认后提交标注，系统随后保存到数据库并更新后续任务。
+
+2. 前后端与用户交互流程
+（1）前端加载页面
+配置加载
+前端首先加载配置文件（例如 label_config.py），其中定义了：
+
+config：XML 格式的界面布局，指定了图片组件（如 <Image name="image1" value="$image1" ... />）和标注工具（如 <RectangleLabels name="label_image1" toName="image1">）。
+interfaces 与 user 信息。
+例如，config 文件中有如下部分（带中文注释）：
+
+xml
+複製
+<View>
+  <Header value="Select label and click the image to start"/>
+  <View style="display: flex;">
+    <!-- 第一个图片区域 -->
+    <View style="width: 33%; margin-right: 1%;">
+      <Image name="image1" value="$image1" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+      <RectangleLabels name="label_image1" toName="image1">
+        <Label value="Defect_left" background="blue"/>
+        <Label value="Defect_right" background="red"/>
+        <Label value="4D" background="green"/>
+      </RectangleLabels>
+    </View>
+    <!-- 其他图片区域…… -->
+  </View>
+</View>
+任务生成
+后端通过调用 task_generator() 函数生成任务数据结构，这里会将处理好的图片数据和预标注信息整合到一起：
+
+python
+複製
+task = task_generator(images_base64, crop_size, metadatas=metadatas, method="YOLO", model_path=model_path)
+其中：
+
+images_base64：由图像处理模块（例如 get_image_pair_for_studio_input()）生成的 Base64 编码图片数据，与 config 中 $image1、$image2 等对应。
+metadatas：通过 get_diff_map() 等函数获取的图像对齐、差分信息。
+method：标注预生成方法，如“YOLO”或“minmax”。
+若数据库中已有标注数据，则 task_generator 会调用 extract_annotations(existing_labels) 将已有标注转换格式后填入 predictions；否则会调用 generate_prelabels() 自动生成候选框。
+生成的 task 数据结构大致如下：
+
+python
+複製
+{
+    'id': 1,
+    'completions': [],
+    'predictions': [
+        {
+            'model_version': 'prelabeling',  # 或 'existing_labels'
+            'result': annotations  # 预标注数据
+        }
+    ],
+    'data': {
+        'image1': "data:image/jpeg;base64,...",
+        'image2': "data:image/jpeg;base64,...",
+        'image3': "data:image/jpeg;base64,...",
+        ...
+    }
+}
+传递任务数据
+最后，前端调用 st_labelstudio(config, interfaces, user, task) 将所有配置和任务数据传给 Label Studio 组件，此组件负责在页面上渲染标注界面。
+
+（2）用户交互
+展示图片和候选标注
+前端组件根据 config 显示任务数据中的图片（例如 task["data"]["image1"] 替换 $image1），同时显示 predictions 中自动生成的候选标注框（由 YOLO_prelabel() 或 generate_prelabels() 生成，格式中包含 "from_name"、"to_name"、"type" 等）。
+
+用户操作
+用户可以直接点击候选框进行调整、修改或删除，也可以手动添加新的标注区域。所有交互结果都会在界面上实时更新。
+
+提交标注
+用户完成标注后点击“Submit”按钮，Label Studio 组件将生成的最终标注结果（JSON 格式）返回给前端。
+
+（3）后端保存与更新
+保存标注
+前端拿到用户提交的标注结果后，通过函数 save_json_to_sqlite(img_path, results_raw, db_path) 将最新的标注数据存入 SQLite 数据库中。
+
+这里 img_path 用作唯一标识，每次提交的标注结果都会和该图像关联。
+更新任务状态
+系统根据用户提交后更新 session 状态（例如 image_index 递增），从而在用户切换图片时加载最新数据。如果有新的标注，则下次任务生成时会通过 fetch_results() 提取已有标注。
+
+反馈与刷新
+系统调用 st.rerun() 刷新页面，使得更新后的标注结果在下次加载时能够显示出来。
+
+3. 关键函数与前后端对应关系
+下面列出部分关键函数及其在流程中的作用：
+
+get_lrf_file(data_dir, selected_lot_id) / get_defect_list(lrf_file)
+→ 用于读取并解析存储缺陷信息的文件，从而确定哪些图像需要标注。
+
+get_image_pair_for_studio_input(...)
+→ 从指定目录加载图像对，调用 load_defect_pair() 和 get_diff_map() 处理图像对，并返回经过颜色映射与卷积处理后的图片（Base64 编码）及元数据。
+
+YOLO_prelabel(t_np_image, rt_np_image, model_path, annotations)
+→ 利用预训练的 YOLO 模型自动预测缺陷候选框，生成预标注数据并追加到 annotations 列表中。
+
+generate_prelabels(...)
+→ 根据选择的预标注方法（如 YOLO 或 minmax）生成候选标注信息。
+
+extract_annotations(existing_labels)
+→ 如果数据库中已有标注，则提取这些标注数据并转换为统一格式，放入 task 的 predictions 字段中。
+
+task_generator(...)
+→ 整合图片数据（Base64 编码）、预标注信息（或已有标注）生成任务数据结构。
+
+st_labelstudio(config, interfaces, user, task)
+→ Label Studio 组件，根据传入的 config 和任务数据渲染前端界面，让用户进行交互标注。
+
+save_json_to_sqlite(img_path, results_raw, db_path)
+→ 将用户最终提交的标注结果存储到后端数据库中，更新任务状态。
+
+整个系统流程如下：
+
+前端加载时，配置文件（config）定义了图片和标注工具的显示方式；后端读取缺陷文件与图像数据并进行预处理。
+后端利用 task_generator 整合图片数据与自动生成的预标注（或已有标注）构造任务数据。
+任务数据传递给 Label Studio 组件后，用户在前端界面上看到图片和候选标注，并进行修改。
+用户提交后，后端将最新标注结果保存到数据库，同时更新任务状态，页面刷新后继续下一轮操作。
+通过上述流程，各模块（前端 UI、后端数据处理、自动预标注、数据库存储）协同工作，实现了前后端与用户之间的无缝交互。

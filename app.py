@@ -276,3 +276,11 @@ st.session_state.update_pressed = False
 最後重置 update_pressed 標誌，確保狀態正確。
 這樣可以使得用戶在提交後如果希望留在當前圖片上進行進一步更新，系統不會自動跳轉；反之，則自動進入下一張圖片進行標注。
 
+
+程式碼沒有看到ｓｕｂｍｉｔ變數
+推理花了 幾秒
+在这份代码中，并没有直接看到一个叫做 “submit” 的变量，因为提交操作是由 Label Studio 组件内部处理的。当用户在组件界面上点击“Submit”按钮后，组件会将最终的标注结果（即 results_raw）返回给 Streamlit 应用，然后代码会通过检查 results_raw 是否为 None 以及是否与上次提交的数据不同（使用 has_results_raw_changed 函数）来判断用户是否完成了提交。
+
+简单来说，提交事件是由 st_labelstudio 组件内部触发的，返回的结果被存储在 results_raw 中，而代码通过这个返回值来决定后续的保存和页面刷新操作。
+
+

@@ -1,0 +1,784 @@
+下面展示的是 Label Studio 与 Streamlit 整合时的关键代码及其设计逻辑。整个设计思路是：
+
+定义前端标注的配置（UI 结构、显示哪些图片、使用哪种标注工具等）。
+构造任务数据（task），将待标注的图片（Base64 编码）和预标注结果传入 Label Studio 组件。
+通过组件返回的标注结果，再进行后续存储与处理。
+1. 配置界面（config）和接口（interfaces）、用户（user）的定义
+这些配置决定了 Label Studio 的前端展示样式、使用的标注工具以及当前标注者信息。下面是一个示例代码（通常定义在 frontend/label_config.py 中）：
+
+python
+複製
+# label_config.py
+
+config = """
+<View>
+  <Header value="Select label and click the image to start"/>
+  <View>
+    <View style="display: flex;">
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image1" value="$image1" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image1" toName="image1">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%; margin-right: 1%;">
+        <Image name="image2" value="$image2" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image2" toName="image2">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      <View style="width: 33%;">
+        <Image name="image3" value="$image3" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <RectangleLabels name="label_image3" toName="image3">
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+    </View>
+  </View>
+</View>
+"""
+
+interfaces = [
+  "panel",
+  "update",
+  "controls",
+  "side-column",
+  "completions:menu",
+  "completions:add-new",
+  "completions:delete",
+  "predictions:menu",
+],
+
+user = {
+  'pk': 1,
+  'firstName': "Labeler",
+  'lastName': "",
+},
+说明：
+
+config 定义了整个标注界面的布局：
+
+三个图像视图（image1、image2、image3），每个图像下绑定了 RectangleLabels 工具，可选择“Defect_left”、“Defect_right”、“4D” 三种标签。
+同时开启了亮度、对比度、缩放等控制。
+interfaces 指定了需要显示的内置工具，如面板、更新、侧边栏、以及预标注（predictions）的菜单。
+
+user 定义了当前标注用户的信息。
+
+2. 构造任务数据（Task）及预标注逻辑
+任务数据包含待标注图片和预标注结果，任务数据会传给 Label Studio 组件。关键函数 task_generator 如下：
+
+python
+複製
+def task_generator(images, crop_size, metadatas=None, method="minmax", model_path=None, label_type="rectangle", existing_labels=None):
+    task = {
+        'completions': [],
+        'predictions': [],
+        'id': 1,
+        'data': {
+            'image1': f"data:image/jpeg;base64,{images[0]}",
+            'image2': f"data:image/jpeg;base64,{images[1]}",
+            'image3': f"data:image/jpeg;base64,{images[2]}",
+            'image4': f"data:image/jpeg;base64,{images[3]}",
+            'image5': f"data:image/jpeg;base64,{images[4]}",
+            'image6': f"data:image/jpeg;base64,{images[5]}"
+        }
+    }
+    if existing_labels:
+        annotations = extract_annotations(existing_labels)
+        task['predictions'].append({
+            'model_version': 'existing_labels',
+            'result': annotations
+        })
+    else:
+        print("no labels found, generating prelabels...")
+        annotations = generate_prelabels(
+            metadatas, crop_size, method=method, model_path=model_path,
+            t_image=images[2], rt_image=images[5], label_type=label_type
+        )
+        task['predictions'].append({
+            'model_version': 'prelabeling',
+            'result': annotations
+        })
+    return task
+说明：
+
+images 参数：一个包含 6 张图片的 Base64 编码字符串列表（例如前3张为 T 类图像，后3张为 Rt 类图像）。
+data 字段：构造了 image1～image6 的数据，每个值都以 data:image/jpeg;base64, 开头，方便前端直接展示。
+existing_labels 判断：
+如果已经存在标注数据（从数据库中获取），则调用 extract_annotations 提取已有的标注结果，放入 predictions 中，标记为 existing_labels。
+否则，调用 generate_prelabels（可以基于 minmax 规则或 YOLO 模型）生成预标注结果，放入 predictions 中，标记为 prelabeling。
+3. 调用 Label Studio 组件
+在主程序（例如 app.py）中，调用 Label Studio 组件将任务传递进去，示例代码如下：
+
+python
+複製
+# 假设 images_base64 是由预处理函数得到的包含 6 张图像的 Base64 字符串列表，
+# crop_size、metadatas、selected_prelabel_method、model_path 等变量均已设置
+
+results_raw = st_labelstudio(
+    config, interfaces, user,
+    task_generator(images_base64, crop_size, metadatas=metadatas, method=selected_prelabel_method, model_path=model_path)
+)
+说明：
+
+st_labelstudio 是一个 Streamlit 组件（通常基于 deneland/streamlit-labelstudio），它将前面构造的 config、interfaces、user 和任务数据传递进去，生成交互式标注界面。
+用户在界面上可以查看预标注结果、调整或重新标注，最终点击提交时，组件返回更新后的标注 JSON 数据（存储在 results_raw 中）。
+4. 整体逻辑总结
+配置定义
+
+定义好 Label Studio 的前端布局（config）、内置接口（interfaces）和用户信息（user）。
+任务数据构造
+
+利用 task_generator 将待标注的图片（经过 Base64 编码）和预标注数据整合成一个任务数据结构。
+如果数据库中已有标注，则加载已有数据；否则自动生成预标注结果。
+组件调用
+
+通过 st_labelstudio 组件调用，将任务数据传入，生成标注界面。
+用户交互后返回标注结果，后续再进行存储和处理。
+这种设计使得前端标注能够非常灵活：既能加载预先生成的预测结果，也可以让用户进行修改，同时与后端数据库进行无缝对接，形成一个完整的标注与训练数据构建闭环。
+
+
+
+这里的意思是，通过调用 task_generator 函数，把需要标注的图片数据和预先生成的标注（或已有的标注预测结果）整合到一个“任务”（task）数据结构里，这个任务结构会传给 Label Studio 组件，让前端展示图片和预标注信息，供用户进一步修改。
+
+让我们用你给的代码来解释这一过程：
+
+1. 图片数据准备
+假设你已经通过图像处理函数得到了一个包含 6 张图片的 Base64 编码字符串列表（例如 images_base64），每张图片都是一个字符串，形如：
+
+python
+複製
+"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD..."
+这些图片通常分别代表不同视角或处理后的图像，比如参考图、测试图、差分图等。
+
+2. 任务数据结构（Task）
+在 task_generator 函数中，首先构造了一个字典 task，这个字典包含了两部分信息：
+
+data 字段：
+这里把 6 张图片的数据存入字典中，键名为 image1 至 image6，例如：
+
+python
+複製
+'data': {
+    'image1': f"data:image/jpeg;base64,{images[0]}",
+    'image2': f"data:image/jpeg;base64,{images[1]}",
+    'image3': f"data:image/jpeg;base64,{images[2]}",
+    'image4': f"data:image/jpeg;base64,{images[3]}",
+    'image5': f"data:image/jpeg;base64,{images[4]}",
+    'image6': f"data:image/jpeg;base64,{images[5]}"
+}
+这一步的作用就是告诉 Label Studio：“这里有 6 张图片，你需要把它们展示出来。”
+
+predictions 字段：
+这个字段存放预标注数据，也就是自动生成的缺陷候选框。代码会检查是否已有标注数据（existing_labels）：
+
+如果有已有标注，则调用 extract_annotations(existing_labels) 提取已有的标注结果，并将其放到 predictions 中；
+
+如果没有，则调用 generate_prelabels(...) 自动生成预标注结果，并把结果也放到 predictions 中，同时标记版本为 prelabeling。
+
+代码如下：
+
+python
+複製
+if existing_labels:
+    annotations = extract_annotations(existing_labels)
+    task['predictions'].append({
+        'model_version': 'existing_labels',
+        'result': annotations
+    })
+else:
+    print("no labels found, generating prelabels...")
+    annotations = generate_prelabels(
+        metadatas, crop_size, method=method, model_path=model_path,
+        t_image=images[2], rt_image=images[5], label_type=label_type
+    )
+    task['predictions'].append({
+        'model_version': 'prelabeling',
+        'result': annotations
+    })
+3. 整体任务数据结构
+整个 task_generator 函数返回的 task 数据结构类似于这样：
+
+python
+複製
+task = {
+    'completions': [],  # 这里暂时没有用户完成的标注
+    'predictions': [
+        {
+            'model_version': 'prelabeling',  # 或 'existing_labels'
+            'result': annotations  # 预标注结果，格式符合 Label Studio 要求
+        }
+    ],
+    'id': 1,
+    'data': {
+        'image1': "data:image/jpeg;base64,....",  # 第一张图片
+        'image2': "data:image/jpeg;base64,....",  # 第二张图片
+        'image3': "data:image/jpeg;base64,....",  # 第三张图片
+        'image4': "data:image/jpeg;base64,....",  # 第四张图片
+        'image5': "data:image/jpeg;base64,....",  # 第五张图片
+        'image6': "data:image/jpeg;base64,...."   # 第六张图片
+    }
+}
+这个结构中：
+
+data 部分：告诉 Label Studio 要显示哪些图片（已经经过 Base64 编码，可以直接在网页中展示）。
+predictions 部分：提供预先生成的标注信息（如缺陷框的位置和类别），这样用户打开标注界面时可以看到系统自动生成的缺陷候选框，用户可以根据需要进行调整或确认。
+4. 传递给 Label Studio 组件
+在主程序中（例如 app.py），你会调用：
+
+python
+複製
+results_raw = st_labelstudio(
+    config, interfaces, user,
+    task_generator(images_base64, crop_size, metadatas=metadatas, method=selected_prelabel_method, model_path=model_path)
+)
+这行代码将之前构造的任务数据结构传给 Label Studio 组件。组件会根据 config 配置把 data 里的图片展示出来，并根据 predictions 中的预标注数据在图片上绘制出候选框。
+
+总结
+“利用 task_generator 将待标注的图片（经过 Base64 编码）和预标注数据整合成一个任务数据结构” 的意思就是：
+
+把已经转换为 Base64 编码的图片（如 image1 到 image6）放到一个字典的 data 部分；
+同时把系统自动生成或已有的预标注结果（比如缺陷的边界框、标签）放到 predictions 部分；
+最后把这两个部分整合在一起形成一个任务（task）字典，这个任务字典就包含了所有前端需要的信息，让 Label Studio 能够显示图片并加载预标注数据，供用户进一步修改和提交。
+这就是整个 task_generator 函数在代码中的作用和逻辑。
+
+
+当前示例中的状态：
+初始时设置为一个空列表 []，表示当前任务还没有完成的标注。
+
+如何修改：
+如果你有预先存在的用户完成标注数据，可以将它们以列表的形式赋值给 completions。例如：
+
+python
+複製
+task['completions'] = [
+    {
+        'id': 'c1',
+        'result': [ ... ]  # 具体的标注结果数据
+    }
+]
+2. predictions
+作用：
+用于存放自动生成的预标注数据或模型预测结果。这个字段通常用于在用户开始标注前，系统就自动提供一些候选的标注信息，方便用户进行修改和确认。
+
+当前示例中的状态：
+通过判断是否存在已有的标注数据（existing_labels），将自动生成的或已有的预标注结果追加到 predictions 列表中。格式通常类似于：
+
+python
+複製
+{
+    'model_version': 'prelabeling',  # 或 'existing_labels'
+    'result': annotations  # annotations 为预标注结果数据（例如边界框、标签等）
+}
+如何修改：
+如果你希望使用其他的预标注结果或更改模型版本标记，可以修改这个字典的内容。例如：
+
+python
+複製
+task['predictions'] = [
+    {
+        'model_version': 'my_custom_model',
+        'result': my_custom_annotations  # 自己生成的预标注结果
+    }
+]
+3. id
+作用：
+任务的唯一标识符。它用来区分不同的标注任务，便于后续数据管理和任务跟踪。
+
+当前示例中的状态：
+设置为 1，表示这个任务的 ID 为 1。
+
+如何修改：
+如果你有多个任务需要管理，每个任务应有不同的 ID。例如：
+
+python
+複製
+task['id'] = 42  # 设置任务 ID 为 42
+或者在构造任务时动态生成唯一的 ID。
+
+4. data
+作用：
+存放实际的待标注数据，这里主要是图片。每个键值对中的键（如 image1、image2 等）会在 Label Studio 的配置（config）中作为变量使用（例如 $image1）。
+
+当前示例中的状态：
+数据字典中包含 6 张图片，键名为 image1 到 image6，值为 Base64 编码后的图片字符串：
+
+python
+複製
+'data': {
+    'image1': "data:image/jpeg;base64,......",
+    'image2': "data:image/jpeg;base64,......",
+    ...
+    'image6': "data:image/jpeg;base64,......"
+}
+如何修改：
+
+如果你只需要展示几张图片，可以调整 data 字典中包含的键和值。例如，若只展示 3 张图片，则：
+python
+複製
+'data': {
+    'image1': "data:image/jpeg;base64,......",
+    'image2': "data:image/jpeg;base64,......",
+    'image3': "data:image/jpeg;base64,......"
+}
+同时需要调整 config 文件中引用的变量。
+如果需要新增更多的数据字段（比如其他辅助信息），可以在 data 中增加新的键。例如：
+python
+複製
+task['data']['additional_info'] = "一些额外信息"
+然后在 Label Studio 的 config 中引用 $additional_info。
+总结
+completions：存放用户最终提交的标注数据，初始为空列表，后续可填入已有标注记录。
+predictions：存放自动生成的预标注或模型预测结果，格式为包含 model_version 和 result 的字典列表。
+id：任务的唯一标识符，用于区分不同任务，可根据实际情况设置不同的值。
+data：存放实际待标注的图片数据（及其他辅助信息），键名在 Label Studio 配置中会被引用。
+修改这些 key 的值时，需要确保与 Label Studio 的配置文件（config）中的变量名称对应一致，这样前端才能正确展示数据并同步标注结果。
+
+
+这里所谓“自动标注”或“预标注”，指的是系统在用户开始手动修改前，通过模型预测或规则算法（比如 minmax 策略）生成候选框信息，并自动填充到任务中。也就是说：
+
+自动标注/预标注：在用户还没手动标注前，系统已经利用训练好的模型（例如 YOLO）或者基于差分图的规则自动检测出图像中可能存在缺陷的区域，生成候选的标注信息。这些候选信息存放在任务数据结构的 predictions 字段中。
+用户加载任务时，看到的不再是完全空白的图片，而是带有候选框的图像，用户可以直接修改、确认或删除这些候选框。
+所以，“自动标注”并不是说模型给出了“最终标注”，而是给出了一个初始的标注候选，方便用户进一步调整和确认。这就提高了标注效率，也减少了人工从零开始标注的工作量。
+
+
+1. YOLO_prelabel
+这个函数利用训练好的 YOLO 模型对输入图像进行推断，自动生成候选的缺陷候选框。生成的候选框将以 Label Studio 需要的格式写入到一个列表（annotations）中，供后续在任务中显示。
+
+python
+複製
+def YOLO_prelabel(t_np_image, rt_np_image, model_path, annotations):
+    t_bbox = inference(t_np_image, model_path)
+    if t_bbox != None:
+        for box in t_bbox:
+            x = box[0]
+            y = box[1]
+            width = box[2]
+            height = box[3]
+            label = box[4]
+            for i in range(1, 4):
+                annotation = {
+                    'from_name': f'label_image{i}',
+                    'to_name': f'image{i}',
+                    'type': 'rectanglelabels',
+                    'value': {
+                        'rectanglelabels': ['Defect_right'],
+                        'x': x.item()*100/256,
+                        'y': y.item()*100/256,
+                        'width': width.item()*100/256,
+                        'height': height.item()*100/256,
+                    }
+                }
+                annotations.append(annotation)
+    rt_bbox = inference(rt_np_image, model_path)
+    if rt_bbox != None:
+        for box in rt_bbox:
+            x = box[0]
+            y = box[1]
+            width = box[2]
+            height = box[3]
+            label = box[4]
+            for i in range(4, 7):
+                annotation = {
+                    'from_name': f'label_image{i}',
+                    'to_name': f'image{i}',
+                    'type': 'rectanglelabels',
+                    'value': {
+                        'rectanglelabels': ['Defect_right'],
+                        'x': x.item()*100/256,
+                        'y': y.item()*100/256,
+                        'width': width.item()*100/256,
+                        'height': height.item()*100/256,
+                    }
+                }
+                annotations.append(annotation)
+        return annotations
+说明：
+
+首先分别对两个输入图像（t_np_image 和 rt_np_image，通常对应 diff map 图像）调用 inference 函数获取候选框。
+对于每个候选框，将候选框信息（坐标、宽度、高度）转换为百分比形式（基于 256×256 图像），并生成多个 annotation 对象（这里 image1～image3 对应 t_np_image 的预测，image4～image6 对应 rt_np_image）。
+将这些 annotation 对象追加到 annotations 列表中，供后续任务使用。
+2. generate_prelabels
+这个函数根据所选的方法（“YOLO”或“minmax”）生成预标注数据。如果方法选择 YOLO，则调用上面的 YOLO_prelabel；如果是 minmax（基于差分图中最值的位置），则调用相应的规则函数（代码中用 minmax_prelabel，但该函数在示例代码中略去）。
+
+python
+複製
+def generate_prelabels(metadatas, crop_size, method="minmax", model_path=None, t_image=None, rt_image=None, label_type="rectangle"):
+    annotations = []
+    if method == "YOLO":
+        # 这里仅预测 diff map，所以只需传入两个图像
+        t_np_image = base64_to_numpy(t_image)
+        rt_np_image = base64_to_numpy(rt_image)
+        YOLO_prelabel(t_np_image, rt_np_image, model_path, annotations)
+    elif method == "minmax":
+        # 基于 SIFT 对齐得到的元数据生成预标注
+        minmax_prelabel(metadatas, crop_size, annotations)
+    return annotations
+说明：
+
+根据参数 method 选择预标注策略：
+YOLO 模型预测：将传入的 Base64 图片转换为 NumPy 数组后调用 YOLO_prelabel；
+minmax 策略：根据传入的元数据（metadatas）和边框尺寸（crop_size）调用规则函数生成候选框。
+最终返回一个包含所有候选标注的列表。
+3. extract_annotations
+当数据库中已有标注时，该函数用于从已有的 JSON 数据中提取出 bounding box 信息，格式化为 Label Studio 所需的结构，并返回给任务。
+
+python
+複製
+def extract_annotations(existing_labels):
+    """
+    Extracts bounding boxes from the existing labels returned by st_labelstudio.
+    """
+    annotations = []
+    if 'areas' in existing_labels:
+        for area_id, area_data in existing_labels['areas'].items():
+            if 'results' in area_data:
+                for result in area_data['results']:
+                    annotation = {
+                        "id": result["id"],
+                        "from_name": result['from_name'],
+                        "to_name": result['to_name'],
+                        "type": result['type']
+                    }
+                    if annotation["type"] == "polygonlabels":
+                        annotation["value"] = {
+                            "polygonlabels": result['value']['polygonlabels'],
+                            "points": [[point['relativeX'], point['relativeY']] for point in area_data['points']],
+                        }
+                    elif annotation["type"] == "rectanglelabels":
+                        annotation["value"] = {
+                            "rectanglelabels": result['value']['rectanglelabels'],
+                            "x": area_data['x']*100/256,
+                            "y": area_data['y']*100/256,
+                            "width": area_data['width']*100/256,
+                            "height": area_data['height']*100/256,
+                            "rotation": area_data['rotation'],
+                        }
+                    annotations.append(annotation)
+    return annotations
+说明：
+
+遍历已有标注中的 "areas"，将每个区域内的标注结果提取出来。
+根据标注类型（矩形或多边形）进行相应的格式转换，这里将绝对像素值转换为百分比。
+返回的 annotations 列表将作为任务数据中的预标注数据。
+4. task_generator
+这个函数将 Base64 编码的图片数据与预标注（或已有标注）整合成一个任务数据结构，传给 Label Studio 组件使用。
+
+python
+複製
+def task_generator(images, crop_size, metadatas=None, method="minmax", model_path=None, label_type="rectangle", existing_labels=None):
+    task = {
+        'completions': [],
+        'predictions': [],
+        'id': 1,
+        'data': {
+            'image1': f"data:image/jpeg;base64,{images[0]}",
+            'image2': f"data:image/jpeg;base64,{images[1]}",
+            'image3': f"data:image/jpeg;base64,{images[2]}",
+            'image4': f"data:image/jpeg;base64,{images[3]}",
+            'image5': f"data:image/jpeg;base64,{images[4]}",
+            'image6': f"data:image/jpeg;base64,{images[5]}"
+        }
+    }
+    if existing_labels:
+        annotations = extract_annotations(existing_labels)
+        task['predictions'].append({
+            'model_version': 'existing_labels',
+            'result': annotations
+        })
+    else:
+        print("no labels found, generating prelabels...")
+        annotations = generate_prelabels(metadatas, crop_size, method=method, model_path=model_path, t_image=images[2], rt_image=images[5], label_type=label_type)
+        task['predictions'].append({
+            'model_version': 'prelabeling',
+            'result': annotations
+        })
+    return task
+说明：
+
+data 字段：存放6张待标注图片（经过 Base64 编码）。
+predictions 字段：
+如果有 existing_labels（即已有标注数据），则调用 extract_annotations 将其格式化后加入；
+否则调用 generate_prelabels 自动生成候选标注数据，并加入 predictions 中。
+completions 字段：初始为空，待用户提交最终标注后由组件填充。
+总结
+YOLO_prelabel、generate_prelabels、extract_annotations 和 task_generator 这几个函数协同工作：
+自动预标注：在任务构造前，通过模型（YOLO）或规则（minmax）自动生成候选标注（候选的 bounding box）。
+已有标注提取：如果已有标注，自动提取并格式化。
+任务构造：将图片数据和预标注信息整合成一个任务数据结构，传递给 Label Studio 组件进行展示与交互。
+
+
+
+
+def extract_annotations(existing_labels):
+    """
+    從 st_labelstudio 返回的已有標注中提取 bounding box 信息
+    """
+    annotations = []  # 初始化一個空列表，用於存放提取出的所有標注信息
+    if 'areas' in existing_labels:  # 檢查傳入的標注數據中是否包含 "areas" 鍵
+        # 遍歷 existing_labels["areas"] 中的每個標注區域
+        for area_id, area_data in existing_labels['areas'].items():
+            if 'results' in area_data:  # 如果該區域中存在標注結果
+                # 遍歷該區域中所有的標注結果
+                for result in area_data['results']:
+                    # 從每個 result 中提取基本信息，構造一個 annotation 字典
+                    annotation = {
+                        "id": result["id"],            # 標注的唯一標識符
+                        "from_name": result['from_name'],  # 標注工具的名稱（來源）
+                        "to_name": result['to_name'],      # 該標注所對應的圖片名稱
+                        "type": result['type']             # 標注的類型，例如 "rectanglelabels" 或 "polygonlabels"
+                    }
+                    # 如果標注類型為多邊形
+                    if annotation["type"] == "polygonlabels":
+                        # 為 annotation 添加 "value" 欄位，其中包括：
+                        #  - "polygonlabels": 從 result 中獲取多邊形標籤（例如 ["Defect_left"]）
+                        #  - "points": 從 area_data 中的每個點提取相對坐標 [relativeX, relativeY]
+                        annotation["value"] = {
+                            "polygonlabels": result['value']['polygonlabels'],
+                            "points": [[point['relativeX'], point['relativeY']] for point in area_data['points']],
+                        }
+                    # 如果標注類型為矩形
+                    elif annotation["type"] == "rectanglelabels":
+                        # 為 annotation 添加 "value" 欄位，其中包括：
+                        #  - "rectanglelabels": 從 result 中獲取矩形標籤（例如 ["Defect_right"]）
+                        #  - "x": 將區域的 x 坐標轉換成百分比（假設原圖寬度為 256）
+                        #  - "y": 將區域的 y 坐標轉換成百分比（假設原圖高度為 256）
+                        #  - "width": 將區域寬度轉換成百分比
+                        #  - "height": 將區域高度轉換成百分比
+                        #  - "rotation": 區域的旋轉角度
+                        annotation["value"] = {
+                            "rectanglelabels": result['value']['rectanglelabels'],
+                            "x": area_data['x'] * 100 / 256,
+                            "y": area_data['y'] * 100 / 256,
+                            "width": area_data['width'] * 100 / 256,
+                            "height": area_data['height'] * 100 / 256,
+                            "rotation": area_data['rotation'],
+                        }
+                    annotations.append(annotation)  # 將構造好的 annotation 添加到 annotations 列表中
+    return annotations  # 返回所有提取出的標注列表
+
+
+初始化：创建一个空的 annotations 列表。
+检查数据：确认 existing_labels 中是否有 "areas" 键。
+遍历每个区域：对每个区域，如果存在 "results"，则遍历其中每个标注结果。
+构造标注字典：从每个 result 中提取基本信息，并根据标注类型设置具体的数值（对于多边形，提取点列表；对于矩形，将坐标和尺寸转换为百分比）。
+收集并返回：将所有构造好的 annotation 添加到列表中，最终返回这个列表。
+这样，extract_annotations 就能将原始的 Label Studio 标注数据转换为标准格式，供后续流程（例如展示、编辑或保存）使用。
+
+
+"from_name" 字段表示生成该标注的工具名称，也就是在 Label Studio 配置中为标注组件设置的名字。具体来说：
+
+在 Label Studio 的配置（config）中，你会定义各种标注工具，比如 RectangleLabels 或 PolygonLabels，并为它们指定一个名称（例如 "label_image1"）。这个名称用于区分不同的标注工具，并且在前端界面中也起到关联标注结果与具体工具的作用。
+
+当用户使用某个标注工具（例如用矩形工具框选缺陷）时，生成的标注数据中就会记录这个工具的名称，这个名称就存储在 "from_name" 字段中。这样，系统知道这条标注数据是由哪个工具产生的，也便于后续对标注数据进行管理或展示。
+
+举个例子：
+
+如果在配置中定义了一个矩形标注工具，并命名为 "label_image1"，那么当用户用这个工具标注时，生成的 annotation 数据会包含 "from_name": "label_image1"，这表示该标注是由工具 "label_image1" 生成的。
+总之，"from_name" 就是标注工具的标识符，用于标识是哪一个具体的标注组件生成了这条标注数据
+
+
+是的，这些字段需要与在 Label Studio 配置（config）中定义的名称和类型相对应。下面详细解释：
+
+"from_name"
+这个字段的值应与 config 中定义的标注工具名称一致。例如，如果你在 config 中为矩形标注工具设置了名称 "label_image1"，那么生成的 annotation 数据中 "from_name" 就应为 "label_image1"，以确保标注数据能正确关联到这个工具。
+
+"to_name"
+这个字段表示目标图片的名称，也要与 config 中定义的图片组件名称匹配。例如，在 config 中你定义了一个图片组件命名为 "image1"，那么 annotation 中的 "to_name" 就应为 "image1"，这样系统才能知道这条标注对应哪张图片。
+
+"type"
+标注类型也需要与 config 中所用的标注组件一致，比如 "rectanglelabels" 对应矩形标注，"polygonlabels" 对应多边形标注。这确保了前端界面能正确解析和显示标注数据。
+
+"id"
+这是标注数据的唯一标识符，通常由系统生成，用于区分不同的标注记录。
+
+总之，这些字段在 annotation 数据中必须与你在 Label Studio 的配置中定义的名称和类型严格对应，这样前端组件才能正确加载、显示和管理标注信息。
+
+
+
+
+在 Label Studio 中，config 配置用于定义前端界面的布局、显示哪些图片、使用哪些标注工具以及它们的名称。比如，你的配置文件可能写在 label_config.py 中，内容如下：
+# label_config.py
+
+# 定义 Label Studio 前端界面的配置，使用 XML 格式描述
+config = """
+<View>
+  <!-- 页面头部，显示提示文本 -->
+  <Header value="Select label and click the image to start"/>
+  <View>
+    <!-- 外层容器，采用 flex 布局水平排列多个子视图 -->
+    <View style="display: flex;">
+      
+      <!-- 第一个图像视图区域 -->
+      <View style="width: 33%; margin-right: 1%;">
+        <!-- 图片组件：名称为 image1，value 使用任务数据中的 $image1 变量；
+             同时启用了亮度、对比度、缩放控制 -->
+        <Image name="image1" value="$image1" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <!-- 矩形标注工具，名称为 label_image1，标注应用于 image1 -->
+        <RectangleLabels name="label_image1" toName="image1">
+          <!-- 定义可选标签及其背景色 -->
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      
+      <!-- 第二个图像视图区域 -->
+      <View style="width: 33%; margin-right: 1%;">
+        <!-- 图片组件：名称为 image2，对应任务中的 $image2 -->
+        <Image name="image2" value="$image2" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <!-- 矩形标注工具，名称为 label_image2，应用于 image2 -->
+        <RectangleLabels name="label_image2" toName="image2">
+          <!-- 定义可选标签 -->
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      
+      <!-- 第三个图像视图区域 -->
+      <View style="width: 33%;">
+        <!-- 图片组件：名称为 image3，对应任务中的 $image3 -->
+        <Image name="image3" value="$image3" brightnessControl="true" contrastControl="true" zoomControl="true"/>
+        <!-- 矩形标注工具，名称为 label_image3，应用于 image3 -->
+        <RectangleLabels name="label_image3" toName="image3">
+          <!-- 定义可选标签 -->
+          <Label value="Defect_left" background="blue"/>
+          <Label value="Defect_right" background="red"/>
+          <Label value="4D" background="green"/>
+        </RectangleLabels>
+      </View>
+      
+    </View>
+  </View>
+</View>
+"""
+
+# 定义前端界面中内置的接口（内置功能），例如面板、更新、侧边栏、标注完成的菜单等
+interfaces = [
+  "panel",
+  "update",
+  "controls",
+  "side-column",
+  "completions:menu",
+  "completions:add-new",
+  "completions:delete",
+  "predictions:menu",
+],
+
+# 定义当前用户的信息，用于标识标注者
+user = {
+  'pk': 1,               # 用户主键ID
+  'firstName': "Labeler",  # 用户的名字
+  'lastName': "",        # 用户的姓氏，此处为空
+}
+
+
+Python 任务构造代码（task_generator）
+在主程序中，你需要构造一个任务数据结构，并传递给 st_labelstudio 组件。这个任务数据结构与 config 中的变量对应。比如，下面的代码展示了如何利用 task_generator 将待标注图片和预标注数据整合到一起：
+
+python
+複製
+def task_generator(images, crop_size, metadatas=None, method="minmax", model_path=None, label_type="rectangle", existing_labels=None):
+    # 构造任务字典，包含：
+    # - completions：存放用户提交的标注结果，初始为空列表
+    # - predictions：预标注信息（自动生成或已有标注）
+    # - id：任务的唯一标识（这里设为1）
+    # - data：包含要展示的图片数据，这里的键名要与 config 中的变量名称对应
+    task = {
+        'completions': [],
+        'predictions': [],
+        'id': 1,
+        'data': {
+            'image1': f"data:image/jpeg;base64,{images[0]}",
+            'image2': f"data:image/jpeg;base64,{images[1]}",
+            'image3': f"data:image/jpeg;base64,{images[2]}",
+            # 如果有更多图片，也可以添加 image4、image5 等
+        }
+    }
+    if existing_labels:
+        # 如果已有标注，则提取现有标注数据
+        annotations = extract_annotations(existing_labels)
+        task['predictions'].append({
+            'model_version': 'existing_labels',
+            'result': annotations
+        })
+    else:
+        # 如果没有已有标注，则调用自动预标注函数生成候选框
+        print("no labels found, generating prelabels...")
+        annotations = generate_prelabels(metadatas, crop_size, method=method, model_path=model_path,
+                                          t_image=images[2], rt_image=images[5], label_type=label_type)
+        task['predictions'].append({
+            'model_version': 'prelabeling',
+            'result': annotations
+        })
+    return task
+对应关系说明：
+
+data 字段中的键：
+例如 'image1' 对应 config 中 <Image name="image1" value="$image1" ... />。
+这保证了当 st_labelstudio 组件加载任务时，会将 task["data"]["image1"] 中的 Base64 图片数据替换到 config 中的 $image1 位置。
+
+预标注部分：
+生成的预标注数据会存储在 predictions 中，并在 config 中的标注组件显示。生成的预标注数据中的 "from_name"、"to_name" 等字段必须与 config 中定义的名称一致（例如 "label_image1" 与 "image1"）。
+
+3. 调用 st_labelstudio 组件
+在主程序（例如 app.py）中，你会将上述构造的任务数据传递给 Label Studio 组件。示例代码如下：
+
+python
+複製
+from frontend.label_config import config, interfaces, user  # 导入 config, interfaces, user
+from prelabel.prelabel import task_generator  # 导入 task_generator 函数
+
+# images_base64 是一个包含 Base64 编码图片字符串的列表，顺序应与 config 中引用的变量一致
+images_base64 = [img1_base64, img2_base64, img3_base64]  # 假设这里只使用三张图片
+
+# 构造任务数据
+task = task_generator(images_base64, crop_size, metadatas=metadatas, method="YOLO", model_path=model_path)
+
+# 调用 st_labelstudio 组件，传入 config, interfaces, user 和任务数据
+results_raw = st_labelstudio(config, interfaces, user, task)
+解释：
+
+通过导入 label_config.py 中的 config、interfaces、user，我们把前端展示界面与后端任务数据相结合。
+task_generator 生成的任务数据中的 data 部分与 config 中的变量（如 $image1）一一对应，这样在前端展示时能正确显示图片。
+预标注（或已有标注）的信息放在 predictions 中，也会在前端显示供用户修改。
+总结
+config 文件 定义了前端如何展示图片和标注工具，其变量（如 image1、label_image1 等）需要与任务数据中的键和标注数据中的字段一致。
+任务构造代码（如 task_generator）将经过 Base64 编码的图片数据和自动预标注（或已有标注）整合成一个任务字典，其中 data 部分的键要与 config 中的引用匹配。
+调用 st_labelstudio 组件时，将 config、interfaces、user 和任务数据传入，从而生成标注界面，供用户查看和编辑标注结果。
+通过这种方式，config 配置与 Python 代码是紧密对应的，使得前端界面和后端数据能够无缝连接，方便标注与后续数据处理。
+
+
+
+流程概览
+配置文件（config）定义前端界面
+在 label_config.py 中，我们用 XML 格式定义了前端界面的布局：
+
+定义了图片组件（例如 <Image name="image1" value="$image1" ... />）
+定义了对应的标注工具（例如 <RectangleLabels name="label_image1" toName="image1">），并设置可选标签
+任务数据生成（task_generator）
+后端代码中，调用 task_generator 函数将待标注的图片数据（Base64 编码）以及预标注（或已有标注）整合成任务数据结构，该数据结构主要包括：
+
+data：包含 image1、image2、image3 等键，值为图片数据（Base64 字符串），与 config 中的变量对应
+predictions：包含预标注候选数据（如果有现有标注则提取，否则自动生成）
+completions：存放用户最终提交的标注，初始为空
+id：任务唯一标识
+调用 Label Studio 组件
+将 config、interfaces、user 和 task 数据传递给 st_labelstudio 组件，组件根据 config 渲染出 UI，展示 task 数据中的图片和预标注候选框，供用户进行修改和确认。
+
+
+
+
+
+
+
+
+
+

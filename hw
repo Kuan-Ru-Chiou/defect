@@ -1,0 +1,7 @@
+vmin_level
+max_features
+max_shift
+ransac_reproj_threshold
+crop_size
+conv_kernel_size
+

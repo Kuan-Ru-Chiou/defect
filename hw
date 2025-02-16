@@ -34,3 +34,212 @@ conv_kernel_size
 用途：設定在對差分圖像進行卷積濾波（平滑）時所使用的卷積核的尺寸。
 說明：卷積核大小直接影響圖像平滑的程度，較大的卷積核可以使圖像更加平滑，但可能也會模糊細節；較小的卷積核則保留更多細節。根據差分圖像的噪聲情況選擇合適的值，可以幫助強調缺陷特徵。
 這些參數在前端介面中提供給使用者進行調整，主要目的是根據不同的圖像特性與需求，調節圖像預處理（包括對齊、差分、色彩映射與濾波）的效果，進而影響到預標注的準確性與最終模型的訓練效果。
+
+
+
+
+
+
+
+################################################################
+
+
+# 如果 diff_map 模式未启用，则直接将原始图像复制到目标 images 目录
+shutil.copy(image_path, images_dir)
+    
+# 同时为该图像创建一个对应的空标签文件，文件名与图像文件名对应（后缀改为 .txt）
+image_name = os.path.basename(image_path)
+label_file = os.path.splitext(image_name)[0] + '.txt'
+label_path = os.path.join(labels_dir, label_file)
+
+
+這段邏輯主要是為了滿足 YOLO 訓練數據集的結構要求。在 YOLO 的訓練流程中，每一張圖像通常都必須有一個對應的標籤檔（即使這個標籤檔是空的），用來告知模型該圖像中有哪些物體（或根本沒有物體）。
+
+具體來說：
+
+複製原始圖像
+當未啟用 diff_map 模式時，代表你直接使用原始圖像而不是經過處理（對齊、差分、濾波）的圖像來進行訓練。這時候就直接把原始圖像複製到目標的 images 目錄中。
+
+創建對應的空標籤檔
+YOLO 的數據加載器通常會要求每一張圖像都必須有一個相應的標籤檔案（通常存放在 labels 目錄中），該標籤檔案記錄了該圖像中的目標位置和類別。
+
+如果圖像中沒有標注（即沒有缺陷或物體），標籤檔就應該是空的。
+這樣可以保證數據集結構一致，並且在訓練過程中，模型能正確判斷這些圖像屬於負樣本（沒有目標）。
+總結來說，這段代碼確保即使在沒有使用 diff_map 模式的情況下，每張圖像都有對應的標籤檔，這對於數據集的一致性和後續 YOLO 模型的正常訓練是必需的。
+
+
+
+#############################
+process_and_augment_images 這個函數主要是用來對輸入的圖像以及其對應的標註邊界框進行預處理和數據增強，其主要目的是：
+
+格式轉換
+
+確保輸入的圖像轉換成 RGB 格式，因為 OpenCV 預設讀取的是 BGR 格式，這一步能讓後續的處理（例如顏色映射和增強）正確顯示顏色。
+邊界框正規化
+
+將每個原始邊界框（包含 x, y, width, height）轉換成 YOLO 所需的格式，即計算出中心點位置與寬高，並將這些值正規化到 [0,1] 範圍內。
+同時根據標籤決定對應的類別 ID（在你的情況中，"Defect_left" 和 "Defect_right" 都被歸為同一類別）。
+數據增強
+
+如果參數 original 為 True，則僅返回經過正規化處理的邊界框和標籤，不做額外的增強。
+如果 original 為 False，則會利用預先定義的數據增強管道（例如使用 albumentations）對圖像及其邊界框進行隨機變換，如旋轉、翻轉、縮放等，從而生成不同版本的增強數據。
+最終返回增強後的圖像以及更新後的邊界框與類別資訊。
+總結來說，process_and_augment_images 的作用是確保圖像格式正確、將標註信息轉換成 YOLO 所需的格式，並且通過數據增強來擴充訓練資料的多樣性，從而幫助提升模型的泛化能力。
+
+###################################
+def process_and_augment_images(image_array, bounding_boxes, aug_params, img_path, original=False):
+    """
+    augment the images and bounding boxes.
+    這個函數用來對輸入的圖像及其邊界框進行數據增強處理，
+    返回增強後的圖像、邊界框及對應的類別ID；
+    如果 original 為 True，則僅返回正規化後的邊界框與類別（不進行增強）。
+    """
+    # 確保圖像為 RGB 格式（一般 OpenCV 讀取圖像預設為 BGR 格式）
+    if image_array.shape[2] == 4:  # 如果圖像有 4 個通道（含 alpha 通道）
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGRA2RGB)  # 將 BGRA 轉換為 RGB 格式
+    else:
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)  # 將 BGR 轉換為 RGB 格式
+
+    # 初始化存放正規化後邊界框與類別ID的列表
+    bboxes = []         # 用來存放正規化後的邊界框數據 [x_center, y_center, width, height]
+    category_ids = []   # 用來存放每個邊界框對應的類別ID
+
+    # 逐一處理傳入的每個邊界框
+    for bbox in bounding_boxes:
+        # 計算邊界框中心點的 x 座標：左上角 x 加上寬度的一半，再除以圖像寬度（正規化到 [0,1]）
+        x_center = (bbox['x'] + bbox['width'] / 2) / image_array.shape[1]
+        # 計算邊界框中心點的 y 座標：左上角 y 加上高度的一半，再除以圖像高度（正規化到 [0,1]）
+        y_center = (bbox['y'] + bbox['height'] / 2) / image_array.shape[0]
+        # 正規化邊界框的寬度
+        width = bbox['width'] / image_array.shape[1]
+        # 正規化邊界框的高度
+        height = bbox['height'] / image_array.shape[0]
+        
+        # 保證 x_center 落在 0 與 1 之間
+        x_center = min(1.0, max(0.0, x_center))
+        # 保證 y_center 落在 0 與 1 之間
+        y_center = min(1.0, max(0.0, y_center))
+        # 保證寬度在 0 與 1 之間
+        width = min(1.0, max(0.0, width))
+        # 保證高度在 0 與 1 之間
+        height = min(1.0, max(0.0, height))
+
+        # 取得該邊界框的標籤
+        label = bbox['label']
+        
+        # 如果標籤為 "Defect_right" 或 "Defect_left"，則將此邊界框歸類為同一類 (類別 0)
+        if label == "Defect_right" or label == "Defect_left":
+            category_ids.append(0)
+        # 如果標籤為 "4D"，則返回 None（可能代表該標籤不適用於後續處理）
+        elif label == "4D":
+            return None
+        
+        # 將計算好的 [x_center, y_center, width, height] 加入邊界框列表中
+        bboxes.append([x_center, y_center, width, height])
+
+    # 如果 original 為 True，表示僅需要原始正規化後的邊界框與類別，不進行增強處理
+    if original == True:
+        return bboxes, category_ids
+
+    # 若需要進行數據增強處理，則嘗試以下步驟
+    try:
+        # 根據傳入的增強參數 aug_params 獲取一個增強管道（例如使用 albumentations 來建立變換管道）
+        transform = get_augmentation_pipeline(aug_params)
+        # 對圖像和邊界框進行數據增強處理，並同時處理類別ID
+        augmented = transform(image=image_array, bboxes=bboxes, category_ids=category_ids)
+        # 返回增強後的圖像、邊界框和類別ID（這裡增強管道會自動對圖像及標籤進行同步變換）
+        return augmented['image'], augmented['bboxes'], augmented['category_ids']
+    except:
+        # 如果增強處理過程中出現錯誤，記錄錯誤日誌並返回 None
+        logger.debug(f"error on {img_path}")
+        return None
+
+
+
+augmented   有滿足yolo格式嗎
+在這段程式碼中，增強後的結果是由你建立的增強管道返回的，通常這個管道是用 albumentations 實現，且在建立管道時你有指定邊界框格式為 YOLO（例如透過 bbox_params=A.BboxParams(format='yolo', label_fields=['category_ids'])）：
+
+augmented['bboxes']：這裡的邊界框在經過增強後仍保持 YOLO 格式，即 [x_center, y_center, width, height]，並且所有數值都已正規化到 [0,1] 範圍內。
+augmented['image']：返回的圖像也是經過增強後的圖像，但圖像格式通常還需與標籤一起再轉換成適合存檔或訓練時的格式。
+因此，答案是：
+是的，augmented 返回的結果（特別是 bboxes 與 category_ids 部分）是符合 YOLO 格式的，可以直接用於 YOLO 訓練。
+
+
+這裡的增強管道每次只會返回一個結果，也就是：
+
+augmented['image']：只會返回一張經過隨機增強後的圖片，
+augmented['bboxes']：返回這張圖片中所有增強後的邊界框（YOLO 格式），
+augmented['category_ids']：返回這些邊界框對應的類別 ID。
+換句話說，每次調用這個增強管道只產生一張增強圖片及其對應的標籤數據。如果需要多張增強圖片，就必須多次調用該函數。
+
+
+
+
+
+#########################################
+
+            # 对该图像进行多次数据增强，生成额外的训练样本
+            for i in range(1, num_of_augments+1):
+                # 随机选取一个新的 vmin_level，范围在 -1.70 到 -0.30
+                vmin_level = torch.FloatTensor(1).uniform_(-1.70, -0.30).item()
+                # 对原始差分图重新应用颜色映射
+                diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+
+                # 随机选择一个卷积核大小（1 到 3 之间）
+                conv_kernel_size = torch.randint(1, 4, (1,)).item()
+                # 对颜色映射后的图像应用新的卷积滤波
+                conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+
+                # 调用数据增强函数，利用 albumentations 等方法对图像及标注进行随机变换
+                try:
+                    aug_image, aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path)
+                except:
+                    continue
+                # 构造增强后图像的保存路径，例如 "T_123_diff_1.png"
+                png_path = os.path.join(images_dir, f"{image_type}_{image_id}_diff_{str(i)}.png")
+                # 构造对应的标签文件路径，例如 "T_123_diff_1.txt"
+                label_path = os.path.join(labels_dir, f"{image_type}_{image_id}_diff_{str(i)}.txt")
+
+                # 将增强后的图像（通常为 torch tensor）转换为 NumPy 数组
+                np_image = aug_image.permute(1, 2, 0).cpu().numpy()
+                    
+                # 再转换为 PIL Image，以便保存为 PNG 格式
+                pil_image = Image.fromarray(np_image)
+                    
+                # 保存增强后的图像
+                pil_image.save(png_path)
+                # 如果经过增强后没有任何标注框
+                if len(aug_bboxes) == 0:
+                    # 若 use_background 为 False，则跳过写标签（即不使用背景样本）
+                    if use_background == False:
+                        continue
+                    # 否则可以写入一个空标签或默认标签（这里写 'None'）
+                    label = 'None'
+                    with open(label_path, 'w') as f:
+                        pass
+                else:
+                    # 如果有标注框，则将每个增强的 bounding box 及对应标签写入标签文件
+                    for bbox, label in zip(aug_bboxes, aug_labels):
+                        with open(label_path, 'a') as f:
+                            f.write(f"{label} {bbox[0]} {bbox[1]} {bbox[2]} {bbox[3]}\n")
+
+
+上面是第一部分
+
+下面是第2部分
+ aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path, original=True)
+
+請問這兩部分 增強圖片  是獨立對同一張圖片去做  在各自存檔 和寫入標籤嗎
+
+
+
+第一部分（for 迴圈內）
+
+在這個迴圈中，針對同一張圖像會隨機生成多個不同的增強版本（每次隨機調整 vmin_level 和卷積核大小，再透過 process_and_augment_images 進行數據增強）。
+每一次增強產生的圖片和對應的標籤會分別存成新的檔案（例如 "T_123_diff_1.png" 與 "T_123_diff_1.txt"、"T_123_diff_2.png" 與 "T_123_diff_2.txt" 等）。
+第二部分（original=True 的調用）
+
+這部分呼叫 process_and_augment_images 時傳入了參數 original=True，表示只返回正規化後的原始邊界框（不進行隨機數據增強），用來產生對應原始圖像的標籤資料。
+這通常用於將原始處理後的數據也加入數據集，確保模型能夠看到未經隨機變換的樣本。
+因此，這兩部分都是獨立地對同一張圖像進行處理，且各自的結果都會存成獨立的圖片與標籤檔案。這樣既能保留原始版本，又能通過數據增強擴充樣本數量。
+

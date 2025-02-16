@@ -1,0 +1,220 @@
+def process_data(data, images_dir, labels_dir, data_type):
+    # 遍历传入数据集（例如训练、验证或测试数据），使用 tqdm 显示处理进度，desc 用于标识当前数据类型
+    for item in tqdm(data, desc=f"Processing {data_type} data"):
+        # 从当前数据项中提取图像路径
+        image_path = item['image_path']
+        
+        # 如果设置了 diff_map 模式（即使用差分图作为训练图像）
+        if diff_map:
+            # 设置图像对齐时使用的参数
+            max_features = 1000
+            max_shift = 10
+            ransac_reproj_threshold = 0.20
+            # 获取图像所在的目录
+            image_dir = os.path.dirname(image_path)
+            # 这里由于不使用真正的 lot_id，所以使用一个占位符
+            selected_lot_id = "DummyVariable"
+            # 设置用于颜色映射的 vmin_level
+            vmin_level = -0.60
+            # 设置卷积核大小，用于后续图像平滑
+            conv_kernel_size = 2
+                
+            # 提取文件名（例如 "123L.png"）用于后续判断和提取 image_id
+            filename = os.path.basename(image_path)
+            # 根据文件路径判断图像类型：T 表示测试图（InstantReviewT），Rt 表示另一类型（InstantReviewRt）
+            if 'InstantReviewT' in image_path:
+                image_type = "T"
+            elif 'InstantReviewRt' in image_path:
+                image_type = "Rt"
+
+            # 利用正则表达式提取图像编号（例如 "123"）
+            image_id = re.search(r'\d+', filename).group()
+
+            # 调用函数加载该图像对应的参考图和测试图，同时返回一个标记是否使用中位参考图的标志
+            ref, test, is_median_ref = load_defect_pair(image_dir, image_id)
+
+            # 尝试使用 "Correlate" 方法对图像进行配准和差分计算
+            try:
+                metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+                    get_diff_map(ref, test, image_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method="Correlate")
+            except:
+                # 如果出错，则采用 "SIFT" 方法作为备选
+                metadata, proc_ref, proc_test, proc_diff, max_pos, min_pos = \
+                    get_diff_map(ref, test, image_id, selected_lot_id, is_median_ref, int(max_features), int(max_shift), ransac_reproj_threshold, method="SIFT")
+            
+            # 将计算得到的差分图（proc_diff）应用 'seismic' 颜色映射，参数 vmin_level 与 -vmin_level 控制色阶范围
+            diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+            # 对颜色映射后的图像使用卷积滤波进行平滑处理，使用预先定义的卷积核
+            conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+            # 将处理后的 NumPy 数组转换为 PIL Image，以便保存为 PNG 格式
+            diff_image_png = Image.fromarray(conv_diff_image)
+
+            # 构造标签文件名，例如 "T_123_diff.txt"
+            label_file = f"{image_type}_{image_id}_diff.txt"
+            # 拼接出标签文件在目标文件夹中的完整路径
+            label_path = os.path.join(labels_dir, label_file)             
+
+            # 从当前数据项中获取该图像的缺陷标注（bounding boxes）
+            bounding_boxes = item['bounding_box']
+
+            # 如果该图像没有任何标注
+            if len(bounding_boxes) == 0:
+                # 若 use_background 为 True，则跳过这张图像（不加入数据集）
+                if use_background == True:
+                    continue
+                # 否则，即使没有缺陷也创建一个空的标签文件
+                with open(label_path, "w") as f:
+                    pass
+            else:
+                # 若图像有缺陷标注，则尝试调用 process_and_augment_images 对原始 diff 图像进行处理，
+                # original=True 表示不进行额外的随机增强，仅提取原始标注信息
+                try:
+                    aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path, original=True)
+                except:
+                    continue
+                # 将处理得到的每个 bounding box 和对应的标签写入标签文件，每行格式为 "label x y width height"
+                for box, label in zip(aug_bboxes, aug_labels):
+                    with open(label_path, "a") as f:
+                        f.write(f"{label} {box[0]} {box[1]} {box[2]} {box[3]}\n")
+            # 保存处理后的原始 diff 图像到目标 images 目录，文件名如 "T_123_diff.png"
+            diff_image_png.save(os.path.join(images_dir, f"{image_type}_{image_id}_diff.png"))
+
+            # 随机生成一个增强倍数，范围在 1 到 max_augment_factor 之间
+            num_of_augments = np.random.randint(1, max_augment_factor)
+                
+            # 对该图像进行多次数据增强，生成额外的训练样本
+            for i in range(1, num_of_augments+1):
+                # 随机选取一个新的 vmin_level，范围在 -1.70 到 -0.30
+                vmin_level = torch.FloatTensor(1).uniform_(-1.70, -0.30).item()
+                # 对原始差分图重新应用颜色映射
+                diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+
+                # 随机选择一个卷积核大小（1 到 3 之间）
+                conv_kernel_size = torch.randint(1, 4, (1,)).item()
+                # 对颜色映射后的图像应用新的卷积滤波
+                conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+
+                # 调用数据增强函数，利用 albumentations 等方法对图像及标注进行随机变换
+                try:
+                    aug_image, aug_bboxes, aug_labels = process_and_augment_images(conv_diff_image, bounding_boxes, aug_params, image_path)
+                except:
+                    continue
+                # 构造增强后图像的保存路径，例如 "T_123_diff_1.png"
+                png_path = os.path.join(images_dir, f"{image_type}_{image_id}_diff_{str(i)}.png")
+                # 构造对应的标签文件路径，例如 "T_123_diff_1.txt"
+                label_path = os.path.join(labels_dir, f"{image_type}_{image_id}_diff_{str(i)}.txt")
+
+                # 将增强后的图像（通常为 torch tensor）转换为 NumPy 数组
+                np_image = aug_image.permute(1, 2, 0).cpu().numpy()
+                    
+                # 再转换为 PIL Image，以便保存为 PNG 格式
+                pil_image = Image.fromarray(np_image)
+                    
+                # 保存增强后的图像
+                pil_image.save(png_path)
+                # 如果经过增强后没有任何标注框
+                if len(aug_bboxes) == 0:
+                    # 若 use_background 为 False，则跳过写标签（即不使用背景样本）
+                    if use_background == False:
+                        continue
+                    # 否则可以写入一个空标签或默认标签（这里写 'None'）
+                    label = 'None'
+                    with open(label_path, 'w') as f:
+                        pass
+                else:
+                    # 如果有标注框，则将每个增强的 bounding box 及对应标签写入标签文件
+                    for bbox, label in zip(aug_bboxes, aug_labels):
+                        with open(label_path, 'a') as f:
+                            f.write(f"{label} {bbox[0]} {bbox[1]} {bbox[2]} {bbox[3]}\n")
+        else:
+            # 如果 diff_map 模式未启用，则直接将原始图像复制到目标 images 目录
+            shutil.copy(image_path, images_dir)
+                
+            # 同时为该图像创建一个对应的空标签文件，文件名与图像文件名对应（后缀改为 .txt）
+            image_name = os.path.basename(image_path)
+            label_file = os.path.splitext(image_name)[0] + '.txt'
+            label_path = os.path.join(labels_dir, label_file)
+
+
+
+
+
+
+详细解释
+函数头与循环：
+
+def process_data(data, images_dir, labels_dir, data_type):
+定义处理数据集的函数，参数分别为：
+data：包含每张图像及其标注信息的列表
+images_dir：目标图像保存目录
+labels_dir：目标标签保存目录
+data_type：一个字符串（例如 "train"、"val"、"test"），用于显示进度条描述
+for item in tqdm(data, desc=f"Processing {data_type} data"):
+遍历数据集中的每个项目，并显示处理进度。
+提取图像路径：
+
+image_path = item['image_path']
+从数据项中获取图像的完整路径。
+diff_map 分支：
+
+if diff_map:
+当使用差分图作为训练数据时，进入此分支。
+设置一系列参数（max_features、max_shift、ransac_reproj_threshold）用于图像对齐；
+获取图像所在的目录、设置一个占位的 lot_id；
+定义颜色映射的 vmin_level 和卷积核大小。
+判断图像类型和提取 image_id：
+
+使用 os.path.basename 获取文件名；
+根据文件路径中是否包含 'InstantReviewT' 或 'InstantReviewRt' 判断图像类型；
+用正则表达式提取图像编号。
+加载图像对及对齐处理：
+
+ref, test, is_median_ref = load_defect_pair(image_dir, image_id)
+调用函数加载参考图与测试图。
+调用 get_diff_map 对图像进行对齐和计算差分图，首先尝试使用 "Correlate" 方法，若失败则使用 "SIFT" 方法。
+对差分图进行颜色映射与卷积滤波：
+
+diff_colored = apply_colormap(proc_diff, 'seismic', vmin_level, -vmin_level)
+将差分图转换为彩色图，突出异常区域。
+conv_diff_image = cv2.filter2D(diff_colored, -1, conv_kernel(int(conv_kernel_size)))
+对彩色图进行平滑处理，降低噪声。
+diff_image_png = Image.fromarray(conv_diff_image)
+转换为 PIL 格式以便保存。
+标签文件构造与标注处理：
+
+构造标签文件名与路径。
+bounding_boxes = item['bounding_box']
+获取该图像对应的缺陷标注。
+若 bounding_boxes 为空：
+若 use_background 为 True，则跳过这张图（不加入数据集）；
+否则创建一个空标签文件。
+若有标注，则调用 process_and_augment_images（此函数内部应用 albumentations 等进行处理），获得处理后 bounding box 信息，并将结果写入标签文件。
+保存原始 diff 图像：
+
+将经过处理的 diff 图像保存到指定目录，文件名根据 image_type 和 image_id 命名。
+数据增强部分：
+
+随机决定对当前图像生成多少个增强样本。
+在循环中：
+随机选取新的 vmin_level 和卷积核大小，对原始差分图重新处理；
+调用 process_and_augment_images 对图像和标注进行随机变换；
+将增强后的图像转换为 PIL 格式保存，同时将增强后的 bounding box 写入对应标签文件。
+如果经过增强后没有任何标注框，则根据 use_background 参数决定是否生成空标签或跳过该增强样本。
+非 diff_map 分支：
+
+如果不使用 diff_map，则直接复制原始图像到目标目录，并为该图像创建一个标签文件（通常为空）。
+通过这段代码，函数 process_data 实现了两大功能：
+
+差分图处理与数据增强：
+当使用 diff_map 模式时，对图像进行配准、计算差分图、颜色映射和平滑，然后生成原始以及多种随机增强版本，并为每个生成对应的 YOLO 格式标签。
+
+直接复制原始图像：
+若未使用 diff_map，则直接将图像复制，并生成标签文件（可能为空）。
+
+这些处理结果最终构成了 YOLO 模型训练所需要的图像和标注文件。
+
+
+
+
+
+

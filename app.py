@@ -327,3 +327,56 @@ R：最后调用 st.rerun() 刷新页面，加载新的任务数据或更新后�
 
 
 
+下面是对该代码主要流程的文字描述，类似于流程图的说明：
+
+初始化阶段
+
+程序启动后，调用 st.set_page_config 将页面设置为宽屏布局。
+接着，检查并初始化 session_state 中的几个关键变量：
+previous_results_raw（上一次提交的标注结果），
+image_index（当前显示图片在列表中的索引），
+lot_index（当前选择的批次索引），
+update_pressed（记录用户是否点击了“Update”按钮，用于决定是否保持当前图片以便继续修改）。
+程序连接到 SQLite 数据库，并创建存放标注结果的表（results_table），如果表不存在则创建。
+侧边栏选择与导航
+
+程序读取数据目录（data_dir）下的所有文件夹，过滤掉不需要的（如 'log'），得到所有 Lot ID。
+通过侧边栏的 selectbox，让用户选择一个 Lot ID，并保存选择的批次（selected_lot_id）。
+根据选定的 Lot ID，调用 get_lrf_file 从对应的批次目录中查找 LRF 文件；然后调用 get_defect_list 解析该 LRF 文件，得到当前批次中所有缺陷图像的 ID 列表（defect_images_id_list）和对应的缺陷类型（defect_type）。
+侧边栏还设置了“Previous Image”与“Next Image”按钮：
+当用户点击“Previous Image”时，程序将 image_index 减 1；如果减到负数，则表示当前批次已经浏览完毕，系统自动将 lot_index 更新到上一个批次，并将 image_index 设置为新批次中最后一张图片。
+当用户点击“Next Image”时，image_index 增加 1；如果超出当前批次的图片数，则自动将 image_index 重置为 0，同时更新 lot_index 指向下一个批次，并重新加载新的 defect_images_id_list 和 defect_type。
+此外，还有一个“Update”按钮，用户点击后，系统将 update_pressed 设置为 True，并立即刷新页面（st.rerun），以便用户在当前图片上继续修改标注。
+选择当前图片
+
+侧边栏中的一个 selectbox 根据 defect_images_id_list 显示所有图片的编号，让用户确认当前显示哪张图片。此时会根据选定的图片更新 session_state.image_index。
+程序同时在页面上显示当前图片对应的缺陷类型信息。
+参数设置与图像预处理
+
+侧边栏提供多个滑块，用户可以调整预标注和图像对齐的参数（如 vmin_level、max_features、max_shift、ransac_reproj_threshold、crop_size、conv_kernel_size）。
+根据选定的 Lot ID、Image ID 及图像类型（例如 “T” 和 “Rt”），调用 get_image_pair_for_studio_input 分别处理两类图像，返回处理后的图像数据（如参考图、测试图、差分图）以及对应的元数据。
+将处理后的图像（Base64 编码）合并为一个列表 images_base64，同时将相关元数据组合到 metadatas 中。
+任务构造与加载已有标注
+
+程序构造一个字符串 img_path，通常由数据目录、Lot ID 和 Image ID 组成，用作该图片在数据库中的唯一标识。
+调用 fetch_results 根据 img_path 从数据库中查找是否已有标注记录；如果有，则将这些 existing_labels 加入任务数据中（例如作为一个字段传入 task），供 Label Studio 预加载显示；如果没有，则继续后续自动生成预标注的流程。
+调用 task_generator 函数构造任务数据。该函数将 images_base64（即图像数据）放入 task 的 data 字段，同时根据是否有 existing_labels 选择：
+如果已有标注，则将其包装并传入 predictions 字段；
+如果没有，则调用自动预标注函数生成预标注结果，并放入 predictions 字段。
+前端标注界面展示与用户交互
+
+程序调用 st_labelstudio 组件，将 config、interfaces、user 和构造好的 task 数据传入。组件根据 XML 配置显示标注界面，用户在该界面上可以查看预处理后的图像和预标注结果，并对标注框进行修改或重新绘制。
+当用户完成标注后，点击 Submit 按钮，组件返回更新后的标注结果（JSON 格式）给程序。
+结果处理与数据库更新
+
+程序调用 has_results_raw_changed 检查返回的标注结果（results_raw）是否与上一次不同。
+如果结果有变化，则先调用 sync_labels_across_3images 对标注数据进行同步（例如，将 image3 的标注复制到其他相关视图），然后调用 save_json_to_sqlite 将最新的标注结果保存到数据库中。
+接下来，程序判断 update_pressed 标志：
+如果 update_pressed 为 False（即用户选择了提交并切换到下一张图片），则自动将 image_index 加 1；若到达当前批次末尾，则更新 lot_index 并重新加载新的图片列表。
+如果 update_pressed 为 True，则保持当前图片的 image_index 不变，允许用户继续修改标注。
+最后，重置 update_pressed 为 False，并调用 st.rerun() 刷新页面，重新加载任务数据。
+这种设计流程实现了以下功能：
+
+前端与后端的互动：用户在前端修改标注，提交后自动更新数据库中保存的标注数据。
+状态管理与导航：通过 session_state 保存当前图片、批次和标注状态，支持用户在不同图片间切换，以及在同一图片上反复修改标注。
+自动与手动标注融合：任务数据中既可以加载已有标注，也可以通过自动预标注生成候选框，用户可以根据需要进行修改。

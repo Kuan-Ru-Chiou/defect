@@ -3590,4 +3590,243 @@ task_generator 返回的任务数据包含了图像和初始标注。
 
 
 
+#####################correlation.py
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+def align_images_corr(ref, test):
+    # Ensure the images are in the correct format
+    ref = ref.astype(np.float32)
+    test = test.astype(np.float32)
+
+    print('ref_shape = ',ref.shape)
+    print('test_shape = ', test.shape)
+
+    # Define the motion model
+    warp_mode = cv2.MOTION_TRANSLATION
+
+    # Initialize the transformation matrix
+    warp_matrix = np.eye(2, 3, dtype=np.float32)
+
+    # Define the number of iterations and termination criteria
+    number_of_iterations = 5000
+    termination_eps = 1e-10
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, number_of_iterations, termination_eps)
+
+    # Run the ECC algorithm
+    try:
+        (cc, warp_matrix) = cv2.findTransformECC(test, ref, warp_matrix, warp_mode, criteria)
+    except:
+        #in some cases the above "findTransformECC" function fails and throws an error
+        (cc, warp_matrix) = (0.0, np.eye(2, 3, dtype=np.float32))
+    # Extract translation values
+    translation_x = warp_matrix[0, 2]
+    translation_y = warp_matrix[1, 2]
+
+    # Apply the transformation to the ref image
+    aligned_ref = cv2.warpAffine(ref, warp_matrix, (test.shape[1], test.shape[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+
+    return aligned_ref, test, [translation_x, translation_y]
+##############################alignment.py
+
+"""
+This file is modified from inspection_sift.py by Carl.
+I've removed some functions since the app doesn't use it. 
+The most important functions are "load_defect_pair" and "get_diff_map"
+"""
+
+
+
+
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import math
+import json
+import glob
+import os
+from loguru import logger
+from alignment.SIFT.sift import align_images_sift
+from alignment.correlation.correlation import align_images_corr
+
+
+
+def normalize_images(ref, test):
+    """Normalize images using OpenCV functions."""
+    # Convert to float32 for processing
+    ref_f = ref.astype(np.float32)
+    test_f = test.astype(np.float32)
+
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    ref_eq = clahe.apply((ref_f * 255).astype(np.uint8)) / 255.0
+    test_eq = clahe.apply((test_f * 255).astype(np.uint8)) / 255.0
+
+    # Normalize to zero mean and unit variance
+    ref_norm = cv2.normalize(ref_eq, None, 0, 1, cv2.NORM_MINMAX)
+    test_norm = cv2.normalize(test_eq, None, 0, 1, cv2.NORM_MINMAX)
+
+    return ref_norm, test_norm
+
+def load_defect_pair(img_path, defect_no):
+    """
+    This function finds the test and reference image from the dataset directory. (currently from "/mnt/fs0/dataset/Layer_M")
+    It handles the suffixes(L, U, Up, Lp ...)
+    """
+    test = None
+    ref_U = None
+    ref_L = None
+    ref_Up = None
+    ref_Lp = None
+
+    images = glob.glob(f'{img_path}/{str(defect_no)}*')
+    for image in images:
+        if image == f'{img_path}/{str(defect_no)}.png':
+            test = image
+        elif image == f'{img_path}/{str(defect_no)}U.png':
+            ref_U = image
+        elif image == f'{img_path}/{str(defect_no)}L.png':
+            ref_L = image
+        elif image == f'{img_path}/{str(defect_no)}L_p.png':
+            ref_Lp = image
+        elif image == f'{img_path}/{str(defect_no)}U_p.png':
+            ref_Up = image
+
+    if test is None:
+        raise ValueError(f'{defect_no}: No Test Image')
+
+    test = cv2.imread(test, cv2.IMREAD_GRAYSCALE)/255
+
+    # Create list to store all available images for median filtering
+    all_images = [test]
+
+    ref_u_img = None
+    ref_l_img = None
+    ref_up_img = None
+    ref_lp_img = None
+    if ref_U is not None:
+        ref_u_img = cv2.imread(ref_U, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_u_img)
+
+    if ref_L is not None:
+        ref_l_img = cv2.imread(ref_L, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_l_img)
+
+    if ref_Up is not None:
+        ref_up_img = cv2.imread(ref_Up, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_up_img)
+
+    if ref_Lp is not None:
+        ref_lp_img = cv2.imread(ref_Lp, cv2.IMREAD_GRAYSCALE)/255
+        all_images.append(ref_lp_img)
+
+    # Only use median if we have more than 3 images, otherwise use ref_U as reference
+    if len(all_images) > 3:
+        reference = np.median(np.stack(all_images), axis=0)
+        is_median_ref = True
+    else:
+        is_median_ref = False
+        if ref_u_img is not None:
+            reference = ref_u_img
+        elif ref_l_img is not None:
+            reference = ref_l_img
+        elif ref_lp_img is not None:
+            reference = ref_lp_img
+        elif ref_up_img is not None:
+            reference = ref_up_img
+        else:
+            raise ValueError(f'{defect_no}: No reference image available')
+
+    return reference, test, is_median_ref
+
+def get_diff_map(ref, test, defect_no, lot_id, is_median_ref, max_features=1000, max_shift=10, ransacReprojThreshold=0.0, method="SIFT"):
+    """
+    input:
+    ref : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    test : numpy.ndarray, shape(256, 256), grayscale [0,1]
+
+    This function gets you the difference map and its metadata
+    You can add your own alignment methods here. As long as you return the following:
+    1.aligned_ref : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    2.aligned_test : numpy.ndarray, shape(256, 256), grayscale [0,1]
+    3.translation : [translation_x, translation_y]  negative means left/up, positive means right/down
+    """
+    assert(ref.shape == test.shape)
+
+    # logger.debug(f"ref type:{type(ref)}")
+    # logger.debug(f"ref shape:{ref.shape}")
+    # logger.debug(f"ref:{ref}")
+    # logger.debug(f"test type:{type(test)}")
+    # logger.debug(f"test shape:{test.shape}")
+    # logger.debug(F"test:{test}")
+    # Align images using SIFT
+    if method == "SIFT":
+        if ransacReprojThreshold > 0.0:
+            #use RANSAC to filter feature point outliers
+            aligned_ref, aligned_test, translation = align_images_sift(ref, test, max_features=max_features, max_shift=max_shift, RANSAC=True, ransacReprojThreshold=ransacReprojThreshold)
+        else:
+            aligned_ref, aligned_test, translation = align_images_sift(ref, test, max_features=max_features, max_shift=max_shift, RANSAC=False)
+
+        # Convert translation to regular Python float
+        translation = [float(translation[0]), float(translation[1])]
+
+    elif method == "Correlate":
+        aligned_ref, aligned_test, translation = align_images_corr(ref, test)
+
+
+    # Normalize images
+    processed_ref, processed_test = normalize_images(aligned_ref, aligned_test)
+    processed_diff = processed_ref - processed_test
+    # Calculate RMSE and max absolute difference
+    rmse = float(np.sqrt(np.mean((processed_ref - processed_test) ** 2)))
+    max_diff = float(max(abs(np.max(processed_diff)), abs(np.min(processed_diff))))
+
+    def get_ceiling_floor(translation):
+        if translation < 0:
+            return -max_shift-2+int(math.floor(translation))
+        else:
+            return max_shift+2+int(math.ceil(translation))
+    int_translation = [get_ceiling_floor(t) for t in translation]
+    # Define the region of interest excluding the translation area
+    roi_start = [max(0, int_translation[0], -int_translation[0]), max(0, int_translation[1], -int_translation[1])]
+    roi_end = [min(processed_diff.shape[0], processed_diff.shape[0] + int_translation[0], processed_diff.shape[0] - int_translation[0]),
+            min(processed_diff.shape[1], processed_diff.shape[1] + int_translation[1], processed_diff.shape[1] - int_translation[1])]
+
+    # Extract the region of interest
+
+    roi_diff = processed_diff[roi_start[0]:roi_end[0], roi_start[1]:roi_end[1]]
+
+    # Find max/min positions within the region of interest
+    max_pos = [int(x) for x in np.unravel_index(roi_diff.argmax(), roi_diff.shape)]
+    min_pos = [int(x) for x in np.unravel_index(roi_diff.argmin(), roi_diff.shape)]
+    # x,y coord will be swapped because of the way numpy unravels indices
+    max_pos = [max_pos[1], max_pos[0]]
+    min_pos = [min_pos[1], min_pos[0]]
+    # Adjust positions to the original image coordinates
+    max_pos = [max_pos[0] + roi_start[0], max_pos[1] + roi_start[1]]
+    min_pos = [min_pos[0] + roi_start[0], min_pos[1] + roi_start[1]]
+
+    # Create metadata dictionary with Python native types
+    metadata = {
+        'lot_id': lot_id,
+        'defect_no': int(defect_no),
+        'translation': translation,
+        'max_difference': float(np.max(processed_diff)),
+        'min_difference': float(np.min(processed_diff)),
+        'abs_max_difference': max_diff,
+        'rmse': rmse,
+        'max_pos': max_pos,
+        'min_pos': min_pos,
+        'is_median_ref': is_median_ref  # Include the median reference flag
+    }
+
+    return metadata, processed_ref, processed_test, processed_diff, max_pos, min_pos
+
+
+
+
+
+
+
 

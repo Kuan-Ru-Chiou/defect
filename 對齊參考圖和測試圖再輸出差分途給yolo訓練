@@ -197,8 +197,88 @@ reference_img, test_img, is_median = load_defect_pair(img_directory, defect_numb
 
 
 
-#############################################################################################################################################
+##########################aligment.py##################
+def align_images_corr(ref, test):
+    # 确保输入图像为 float32 类型
+    ref = ref.astype(np.float32)
+    test = test.astype(np.float32)
 
+    print('ref_shape = ', ref.shape)
+    print('test_shape = ', test.shape)
+
+    # 定义运动模型：这里选择了平移模型
+    warp_mode = cv2.MOTION_TRANSLATION
+
+    # 初始化变换矩阵（2×3的单位矩阵）
+    warp_matrix = np.eye(2, 3, dtype=np.float32)
+
+    # 设置迭代次数和终止条件
+    number_of_iterations = 5000
+    termination_eps = 1e-10
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, number_of_iterations, termination_eps)
+
+    # 调用 ECC 算法来计算最佳平移变换
+    try:
+        (cc, warp_matrix) = cv2.findTransformECC(test, ref, warp_matrix, warp_mode, criteria)
+    except:
+        # 如果算法失败，返回默认值
+        (cc, warp_matrix) = (0.0, np.eye(2, 3, dtype=np.float32))
+    
+    # 提取平移参数（x 和 y 方向的位移）
+    translation_x = warp_matrix[0, 2]
+    translation_y = warp_matrix[1, 2]
+
+    # 根据计算的变换矩阵，对参考图进行反向仿射变换，使其与测试图对齐
+    aligned_ref = cv2.warpAffine(ref, warp_matrix, (test.shape[1], test.shape[0]),
+                                 flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+
+    return aligned_ref, test, [translation_x, translation_y]
+
+
+
+
+返回值与数据结构解释
+aligned_ref
+
+类型：NumPy 数组
+内容：经过仿射变换后，对齐到测试图像坐标系中的参考图。
+形状：与测试图像一致，即 (height, width)（对于单通道灰度图）或 (height, width, channels)（对于彩色图像）。
+用途：作为对齐后的图像，用于后续差分计算或其他图像处理步骤。
+test
+
+类型：NumPy 数组
+内容：输入的测试图像，经过类型转换为 float32（归一化到 [0,1]），但未做其他变换。
+形状：与原始测试图像相同，例如 (height, width) 或 (height, width, channels)。
+用途：保持原始测试图像信息，通常与对齐后的参考图进行比较（例如计算差分图）。
+[translation_x, translation_y]
+
+类型：Python 列表，其中包含两个元素
+内容：
+translation_x：从变换矩阵中提取的水平方向位移（浮点数）。
+translation_y：从变换矩阵中提取的垂直方向位移（浮点数）。
+用途：记录参考图与测试图之间的平移量，可以用于后续计算 ROI 或用于调试、日志记录等。
+其他中间变量说明
+warp_mode
+
+类型：整数常量
+内容：设定为 cv2.MOTION_TRANSLATION，表示仅计算平移变换。
+warp_matrix
+
+类型：NumPy 数组，形状 (2, 3)，dtype 为 float32
+内容：在初始化时为单位矩阵，经过 cv2.findTransformECC 后更新为最佳估计的平移变换矩阵。
+用途：用于将参考图像进行仿射变换，从而与测试图对齐。
+cc
+
+类型：浮点数
+内容：由 cv2.findTransformECC 返回的相关系数，用于衡量对齐的质量。虽然此变量未被返回，但它在调试时可帮助判断对齐效果。
+criteria
+
+类型：元组
+内容：包含迭代终止条件（迭代次数和误差阈值），供 cv2.findTransformECC 使用。
+总结
+函数 align_images_corr 的目标是使用 ECC 算法对参考图和测试图进行平移对齐，并返回对齐后的参考图、原始测试图以及平移向量（translation_x, translation_y）。这些返回值的数据结构都是标准的 NumPy 数组或 Python 列表，便于后续处理，如差分计算、ROI 提取和进一步数据增强。
+
+这种设计确保了后续流程中，可以直接利用对齐后的图像进行缺陷检测，提高模型的训练效果和检测准确性。
 
 
 

@@ -158,3 +158,11 @@ if __name__ == "__main__":
     output_file = 'lrf_defect_info.csv'
     write_to_csv(lrf_info, output_file)
     print(f"Information saved to {output_file}")
+
+
+
+总结
+defect_info：仅针对单个 .lrf 文件，返回的是一个缺陷条目的列表，每个条目包含缺陷编号和类别。
+lrf_info：在遍历所有 .lrf 文件后，每个缺陷记录都会存入一个字典，包含批次ID（lot_id）、缺陷编号（defect_number）、缺陷类别（class_type）、该批次的图像数量（image_count）、文件中记录的总缺陷数（total_defects）以及对应图像文件夹路径（image_path）。
+这种设计使得你能够对每个批次内的每个缺陷进行单独记录和后续统计，非常适合后续的分析和报告使用。
+
